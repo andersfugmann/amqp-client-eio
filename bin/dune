@@ -1,0 +1,5 @@
+(executable
+ (public_name amqp_client_eio)
+ (name main)
+ (libraries eio_main amqp_client_eio)
+ (modes byte exe))

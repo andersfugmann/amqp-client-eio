@@ -1,0 +1,18 @@
+(library
+ (name amqp_client_eio)
+ (public_name amqp_client_eio)
+ (libraries  eio_main ocplib-endian.bigstring)
+ (synopsis "Amqp client library based on eio"))
+
+
+(rule
+ (targets spec.ml)
+ (deps    ../spec/amqp0-9-1.extended.xml)
+ (action  (with-stdout-to %{targets} (run ../spec/gen_spec.exe -type specification %{deps})))
+)
+
+(rule
+ (targets constants.ml)
+ (deps    ../spec/amqp0-9-1.extended.xml)
+ (action  (with-stdout-to %{targets} (run ../spec/gen_spec.exe -type constants %{deps})))
+)

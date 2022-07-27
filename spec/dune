@@ -1,0 +1,5 @@
+(executable
+ (name gen_spec)
+ (modules Gen_spec)
+ (libraries ezxmlm str base)
+)

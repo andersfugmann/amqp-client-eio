@@ -3,12 +3,16 @@ open Types
 open StdLabels
 open Utils
 
-type 'a confirms =
+type _ confirms =
   | No_confirm: [ `Ok ] confirms
   | With_confirm: [ `Ok | `Rejected ] confirms
 
 let no_confirm = No_confirm
 let with_confirm = With_confirm
+
+type 'a confirm = 'a confirms
+  constraint 'a = [> `Ok ]
+  constraint 'a = [< `Ok | `Rejected ]
 
 exception Closed of string
 
@@ -22,11 +26,7 @@ type message_reply = { message_id: message_id;
                        promise: (Cstruct.t * Framing.content option) Promise.u;
                      }
 
-type deliver = { deliver : Spec.Basic.Deliver.t;
-                 content_header: Framing.Content_header.t;
-                 content_data: Cstruct.t;
-                 body: Cstruct.t list;
-               }
+type deliver = Spec.Basic.Deliver.t * Framing.content
 
 type 'a command =
   | Send_request of { message: Cstruct.t list; replies: message_reply list }
@@ -38,8 +38,6 @@ type 'a command =
   (** Register a consumer. *)
   | Deregister_consumer of { consumer_tag: consumer_tag;  promise: unit Promise.u; }
   (** De-register  a consumer. *)
-  (* constraint 'a = [> `Ok ]
-     constraint 'a = [< `Ok | `Rejected ]*)
 
 type 'a t = {
   connection: Connection.t;
@@ -48,18 +46,19 @@ type 'a t = {
   receive_stream: (Types.Frame_type.t * Cstruct.t) Stream.t; (** Receiving messages *)
   send_stream: Cstruct.t Stream.t; (** Message send stream *)
   command_stream: 'a command Stream.t; (** Communicate commands *)
+  frame_max: int;
+  service: Service.t;
   mutable acks: (int * 'a Promise.u) Mlist.t;
   waiters: (message_reply list) Queue.t; (** Users waiting for Replies. This should be a map. *)
   consumers: (consumer_tag, deliver Stream.t) Hashtbl.t;
   mutable next_message_id: int;
   mutable flow: (unit Promise.t * unit Promise.u);
   mutable close_reason: exn option;
-} (* constraint 'a = [> `Ok ]
-     constraint 'a = [< `Ok | `Rejected ] *)
+}
 
-type 'a with_confirms = 'a confirms -> 'a t
-  (* constraint 'a = [> `Ok ]
-     constraint 'a = [< `Ok | `Rejected ] *)
+type 'a with_confirms = 'a confirm -> 'a t
+  constraint 'a = [> `Ok ]
+  constraint 'a = [< `Ok | `Rejected ]
 
 
 let rec handle_commands t =
@@ -98,25 +97,37 @@ let rec handle_commands t =
 
 exception Channel_closed of Spec.Channel.Close.t
 
-let handle_incoming_message: type a. a confirms -> a t -> (Types.Frame_type.t * Cstruct.t) -> unit = fun confirm ->
-  let deliver_id, read_deliver =
-    let open Protocol.Spec in
-    let { message_id; spec; make; _ }, _content = Spec.Basic.Deliver.def in
-    message_id, read spec make
-  in
-  let ack_id, read_ack =
-    let open Protocol.Spec in
-    let { message_id; spec; make; _ } = Spec.Basic.Ack.reply in
-    message_id, read spec make
-  in
-  let nack_id, read_nack =
-    let open Protocol.Spec in
-    let { message_id; spec; make; _ } = Spec.Basic.Nack.reply in
-    message_id,read spec make
-  in
-  let flow_id, flow_f = Framing.server_request_response Spec.Channel.Flow.reply in
-  let close_id, close_f = Framing.server_request_response Spec.Channel.Close.reply in
+type 'a x = [< `Ok | `Rejected > `Ok ] as 'a
 
+(** Initiate graceful shutdown *)
+let shutdown t reason =
+  t.close_reason <- Some reason;
+
+  begin
+    match Promise.is_resolved (fst t.flow) with
+    | true -> ()
+    | false -> Promise.resolve_exn (snd t.flow) reason
+  end;
+
+  Stream.close t.command_stream reason;
+
+  (* Cancel all acks *)
+  Mlist.take_while ~pred:(fun _ -> true) t.acks |> List.iter ~f:(fun (_, promise) -> Promise.resolve_exn promise reason);
+  Queue.iter (fun waiter -> List.iter ~f:(fun { promise; _ } -> Promise.resolve_exn promise reason) waiter) t.waiters;
+  Queue.clear t.waiters;
+  Hashtbl.iter (fun _key stream -> Stream.close stream reason) t.consumers;
+  ()
+
+(* We should consider how we merge the CStructs *)
+let handle_deliver: _ t -> Spec.Basic.Deliver.t -> unit = fun t deliver ->
+  (* Ok. Deliver has been read. Now read content *)
+  let content = Framing.read_content t.receive_stream in
+
+  match Hashtbl.find_opt t.consumers deliver.consumer_tag with
+  | Some stream -> Stream.send stream (deliver, content)
+  | None -> failwith "Could not find consumer for delivered message"
+
+let handle_confirm: type a. a confirms -> a t -> _ = fun confirm t ->
   let confirm: a t -> delivery_tag:delivery_tag -> multiple:bool -> [ `Ok | `Rejected ] -> unit =
     match confirm with
     | No_confirm -> fun _t ~delivery_tag:_ ~multiple:_  _ -> ()
@@ -132,81 +143,30 @@ let handle_incoming_message: type a. a confirms -> a t -> (Types.Frame_type.t * 
         | Some (_, promise) ->
           Eio.Promise.resolve_ok promise result
   in
+  function
+  | `Ack Spec.Basic.Ack.{ delivery_tag; multiple; } ->
+    confirm t ~delivery_tag ~multiple `Ok
+  | `Nack Spec.Basic.Nack.{ delivery_tag; multiple; requeue = false } ->
+    confirm t ~delivery_tag ~multiple `Rejected
+  | `Nack Spec.Basic.Nack.{ requeue = true; _ } ->
+    failwith "Cannot requeue already sent messages"
 
-  fun t -> function
-  | (Types.Frame_type.Method, data) ->
-    begin
-      match Framing.decode_method_header data with
-      | (message_id, data) when Types.Message_id.equal message_id deliver_id ->
-        begin
-          let deliver = read_deliver data 0 in
-          let Framing.{ header; data; body } = Framing.read_content t.receive_stream in
-          let message = { deliver; content_header = header; content_data = data; body } in
-          match Hashtbl.find_opt t.consumers deliver.consumer_tag with
-          | Some stream -> Stream.send stream message
-          | None -> failwith "Could not find consumer for delivered message"
-        end
-      | (message_id, data) when Types.Message_id.equal message_id flow_id ->
-        flow_f ~stream:t.send_stream ~channel_no:t.channel_no data @@ (fun init { active } ->
-          let current = Eio.Promise.is_resolved (fst t.flow) in
-          let () = match active, current with
-            | true, true -> ()
-            | false, false -> ()
-            | true, false -> Eio.Promise.resolve_ok (snd t.flow) ()
-            | false, true -> t.flow <- Eio.Promise.create ()
-          in
-          init ~active ()
-        )
-      | (message_id, data) when Types.Message_id.equal message_id close_id ->
-        let exn = ref (failwith "error") in
-        close_f ~stream:t.send_stream ~channel_no:t.channel_no data (fun init reason ->
-          exn := Channel_closed reason;
-          init ()
-        );
-        raise !exn
-      | (message_id, data) when Types.Message_id.equal message_id ack_id ->
-        let Spec.Basic.Ack.{ delivery_tag; multiple; } = read_ack data 0 in
-        confirm t ~delivery_tag ~multiple `Ok
-      | (message_id, data) when Types.Message_id.equal message_id nack_id ->
-        let Spec.Basic.Nack.{ delivery_tag; multiple; requeue=_; } = read_nack data 0 in
-        confirm t ~delivery_tag ~multiple `Rejected
-      | (message_id, data) ->
-        let message_replies = Queue.pop t.waiters in
-        let handler = List.find ~f:(fun { message_id = message_id'; _ } -> Types.Message_id.equal message_id message_id') message_replies in
-        (* If the handler is not found, we have a protocol violation *)
-        let { message_id=_; has_content; promise } = handler in
-        let content = match has_content with
-          | false -> None
-          | true -> Some (Framing.read_content t.receive_stream)
-        in
-        Eio.Promise.resolve_ok promise (data, content)
-    end
-  | ((Content_header | Content_body | Heartbeat), _data) -> failwith "Only message requests expected"
-
-let rec handle_incoming_messages confirm t =
-  let message = Stream.receive t.receive_stream in
-  handle_incoming_message confirm t message;
-  handle_incoming_messages confirm t
+let handle_ack confirm_f ack = confirm_f (`Ack ack)
+let handle_nack confirm_f nack = confirm_f (`Nack nack)
+let handle_close _t _ = failwith "Not Implemented"
+let handle_flow _t _ = failwith "Not Implemented"
 
 
-(** Initiate graceful shutdown *)
-let shutdown t reason =
-  t.close_reason <- Some reason;
+let handle_message t data = function
+  | Frame_type.Method -> Service.handle_method t.service data
+  | Frame_type.Content_header -> failwith "Stray content header"
+  | Frame_type.Content_body -> failwith "Stray content body"
+  | Frame_type.Heartbeat -> failwith "Per channel heartbeats not expected"
 
-  begin
-    match Promise.is_resolved (fst t.flow) with
-    | true -> ()
-    | false -> Promise.resolve_exn (snd t.flow) reason
-  end;
-
-  Stream.close ~notify_consumers:false t.command_stream reason;
-
-  (* Cancel all acks *)
-  Mlist.take_while ~pred:(fun _ -> true) t.acks |> List.iter ~f:(fun (_, promise) -> Promise.resolve_exn promise reason);
-  Queue.iter (fun waiter -> List.iter ~f:(fun { promise; _ } -> Promise.resolve_exn promise reason) waiter) t.waiters;
-  Queue.clear t.waiters;
-  Hashtbl.iter (fun _key stream -> Stream.close stream reason) t.consumers;
-  ()
+let rec consume_messages t =
+  let frame_type, data = Stream.receive t.receive_stream in
+  handle_message t data frame_type;
+  consume_messages t
 
 let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connection confirm_type ->
   let has_confirm =
@@ -218,14 +178,20 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
   in
 
   let receive_stream = Stream.create () in
-  let channel_no, send_stream = Connection.register_channel connection receive_stream in
+  (* Request channel number and register the receiving stream for same *)
+  let Connection.{ channel_no; send_stream; frame_max } = Connection.register_channel connection receive_stream in
+
+  let service = Service.init ~send_stream ~receive_stream ~channel_no () in
+
   let t = {
     connection;
     confirms_enabled = has_confirm;
     channel_no;
     receive_stream;
     send_stream;
-    command_stream = Stream.create ~max_size:1 ();
+    command_stream = Stream.create ~capacity:1 ();
+    frame_max;
+    service;
     (* When we close a stream, we try to post a message. This is problematic if the consumer trues to close => deadlock. *)
     (* So how do we close a stream? *)
     acks = Mlist.create ();
@@ -234,31 +200,33 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
     next_message_id = 1;
     flow = Promise.create ();
     close_reason = None;
-  } in
-
-  (* We should use the standard framework to send and receive replies *)
-  let channel_open = Framing.create_method_frame Spec.Channel.Open.def ~channel_no () in
-  Stream.send t.send_stream channel_open;
-  let frame_type, data = Stream.receive t.receive_stream in
-  assert (Types.Frame_type.equal frame_type Types.Frame_type.Method);
-  Framing.read_method Spec.Channel.Open_ok.def data;
-  begin
-    match t.confirms_enabled with
-    | true ->
-      let channel_open = Framing.create_method_frame_args Spec.Confirm.Select.def ~channel_no ~nowait:false () in
-      Stream.send t.send_stream channel_open;
-      let (_tpe, data) = Stream.receive t.receive_stream in
-      let () = Framing.read_method Spec.Confirm.Select_ok.def data in
-      ()
-    | false -> ()
-  end;
+  }
+  in
 
   Eio.Fiber.fork_sub
     ~sw
     ~on_error:(fun exn -> Printf.printf "Channel exited: %s\n%!" (Printexc.to_string exn); shutdown t exn)
     (fun sw ->
-      Eio.Fiber.fork ~sw (fun () -> try handle_commands t with _ -> ());
-      Eio.Fiber.fork ~sw (fun () -> handle_incoming_messages confirm_type t);
-    );
 
+       let handle_confirm = handle_confirm confirm_type t in
+       (* Setup the service *)
+       Service.server_request Spec.Basic.Deliver.def service (handle_deliver t);
+       Spec.Basic.Ack.server_request service (handle_ack handle_confirm);
+       Spec.Basic.Nack.server_request service (handle_nack handle_confirm);
+       Spec.Channel.Close.server_request_reply service (handle_close t);
+       Spec.Channel.Flow.server_request_reply service (handle_flow t);
+
+       (* TODO: Handle returns *)
+
+       (* Start handling messages before channel open *)
+       Eio.Fiber.fork ~sw (fun () -> consume_messages t);
+
+       Spec.Channel.Open.client_request service ();
+
+
+       (* Enable message confirms *)
+       if t.confirms_enabled then Spec.Confirm.Select.(client_request service { nowait = false });
+
+       Eio.Fiber.fork ~sw (fun () -> try handle_commands t with _ -> ());
+    );
   t

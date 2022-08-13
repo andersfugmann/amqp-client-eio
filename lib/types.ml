@@ -10,6 +10,9 @@ module Message_id = struct
   let sexp_of_t _t = failwith "Sexp not implemented"
 
   let equal a b = compare a b = 0
+
+  let to_string { class_id; method_id } =
+    Printf.sprintf "(%d, %d)" class_id method_id
 end
 
 module Frame_type = struct
@@ -33,6 +36,7 @@ module Frame_type = struct
     | Heartbeat -> Constants.frame_heartbeat
 
   let equal = (=)
+
 end
 
 type bit = bool

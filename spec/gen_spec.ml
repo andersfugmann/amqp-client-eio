@@ -1,5 +1,6 @@
+open StdLabels
 open Printf
-module List = ListLabels
+
 let indent = ref 0
 let in_comment = ref false
 let emit_location = ref false
@@ -16,7 +17,7 @@ let emit_loc loc =
   | false ->
     printf "# %d \"%s\"\n" loc __FILE__
 
-let emit ?loc fmt =
+let emit ?disable ?loc fmt =
   let loc = match loc with
     | Some loc -> Some loc
     | None when not !emit_location && not !in_comment && false -> begin
@@ -32,10 +33,10 @@ let emit ?loc fmt =
   assert (!indent >= 0);
   let indent = String.make (!indent * 2) ' ' in
   (* Get last location *)
-  ksprintf (fun s -> option_iter ~f:emit_loc loc; print_string s; ) ("%s" ^^ fmt ^^ "\n") indent
+  ksprintf (fun s -> match disable with Some true -> () | _ -> option_iter ~f:emit_loc loc; print_string s; ) ("%s" ^^ fmt ^^ "\n") indent
 
 let strip_doc doc =
-  String.split_on_char '\n' doc
+  String.split_on_char ~sep:'\n' doc
   |> List.rev_map ~f:String.trim
   |> (function "" :: xs -> xs | xs -> xs)
   |> List.rev
@@ -182,7 +183,7 @@ let parse_amqp xml =
   |> List.rev
 
 let bind_name str =
-  String.map (function '-' -> '_' | c -> Char.lowercase_ascii c) str
+  String.map ~f:(function '-' -> '_' | c -> Char.lowercase_ascii c) str
 
 let variant_name str =
   bind_name str
@@ -247,7 +248,7 @@ let spec_str arguments =
   arguments
   |> List.map ~f:(fun t -> t.Field.tpe)
   |> fun a -> List.append a ["[]"]
-  |> String.concat " :: "
+  |> String.concat ~sep:" :: "
 
 let emit_method ?(is_content=false) class_index
     { Method.name;
@@ -274,7 +275,7 @@ let emit_method ?(is_content=false) class_index
 
   let t_args = match types with
     | [] -> "()"
-    | t -> List.map ~f:(fun (a, _, _) -> a) t |> String.concat "; " |> sprintf "{ %s }"
+    | t -> List.map ~f:(fun (a, _, _) -> a) t |> String.concat ~sep:"; " |> sprintf "{ %s }"
   in
   let names =
     arguments
@@ -287,7 +288,7 @@ let emit_method ?(is_content=false) class_index
           "(reserved_value " ^ t.Field.tpe ^ ")"
         | t -> bind_name t.Field.name
       )
-    |> String.concat " "
+    |> String.concat ~sep:" "
   in
 
   (match types with
@@ -313,21 +314,29 @@ let emit_method ?(is_content=false) class_index
   let make =
     let lhs = match names with
       | [] -> ""
-      | names -> sprintf "fun %s ->" (String.concat " " names)
+      | names -> sprintf "fun %s ->" (String.concat ~sep:" " names)
     in
     sprintf "%s %s" lhs t_args
   in
-  let apply = sprintf "fun f %s -> f %s" t_args values in
 
   let inames = List.filter ~f:((<>) "_") names in
-  let init = match types, is_content with
-    | [], _ -> sprintf "fun f () -> f ()"
-    | _, true ->
-      (* This will not work for unit type *)
-      sprintf "fun f %s () -> f { %s }" (List.map ~f:(fun n -> "?" ^ n) inames |> String.concat " ") (inames |> String.concat "; ")
-    | _, false ->
-      sprintf "fun f %s () -> f { %s }" (List.map ~f:(fun n -> "~" ^ n) inames |> String.concat " ") (inames |> String.concat "; ")
+  let make_named = match types, is_content with
+    | [], _ -> sprintf "fun f -> f"
+    | _ ->
+      let access = match is_content with true -> "?" | false -> "~" in
+      sprintf "fun f %s () -> f %s" (List.map ~f:(fun n -> access ^ n) inames |> String.concat ~sep:" ") t_args
   in
+
+  let apply = sprintf "fun f %s -> f %s" t_args values in
+
+  let apply_named = match types, is_content with
+    | [], _ -> sprintf "fun f -> f"
+    | _, true ->
+      sprintf "fun f %s -> f %s ()" t_args (List.map ~f:(fun n -> "?" ^ n) inames |> String.concat ~sep:" ")
+    | _, false ->
+      sprintf "fun f %s -> f %s ()" t_args (List.map ~f:(fun n -> "~" ^ n) inames |> String.concat ~sep:" ")
+  in
+
   emit_loc __LINE__;
   emit "let message_id = %s" message_id;
 
@@ -336,40 +345,48 @@ let emit_method ?(is_content=false) class_index
     emit "message_id;";
     emit "spec = %s;" spec;
     emit "make = (%s);" make;
+    emit "make_named = (%s);" make_named;
     emit "apply = (%s);" apply;
-    emit "init = (%s);" init;
+    emit "apply_named = (%s);" apply_named;
     decr indent;
     ()
   in
-  begin match content with
-  | false ->
-    emit "let def : _ def = {";
-    emit_record_fields ();
-    emit "}";
-    ()
-  | true ->
-    emit "let def : _ def * _ Protocol.Content.def = ({";
-    emit_record_fields ();
-    emit "}, Content.def)";
-    ()
-  end;
+  emit "let def : _ def = {";
+  emit_record_fields ();
+  emit "}";
   emit "";
 
+  (* Construct expect functions *)
+  let () = match is_content, content with
+    | false, false -> emit "let expect f = Service.expect_method def f"
+    | false, true -> emit "let expect f = Service.expect_method_content def Content.def f"
+    | true, _ -> ()
+  in
   (* Emit call definitions *)
   let response = List.map ~f:variant_name response in
-  if List.length response >= 0 && ((synchronous && response != []) || not synchronous)  then begin
-    let id r =
-      if List.length response > 1 then
-        [ "(fun m -> `" ^ r ^ " m)" ]
-      else
-        []
+  if ((synchronous && response != []) || not synchronous) then begin
+    let id r = match response with
+      | [] | [_]-> "(fun id -> id)"
+      | _ -> "(fun m -> `" ^ r ^ " m)"
     in
-    if client then
+    if client && not content then begin
       emit ~loc:__LINE__ "let reply = (%s)"
-        ("def" :: (response |> List.concat_map ~f:(fun s -> Printf.sprintf "%s.def" s :: (id s))) |> String.concat ", ");
-    if server then
+        ("def" :: (response |> List.map ~f:(Printf.sprintf "%s.def")) |> String.concat ~sep:", ");
+
+      match response with
+      | [] -> emit ~loc:__LINE__ "let server_request = Service.server_request def"
+      | [rep] -> emit ~loc:__LINE__ "let server_request_reply = Service.server_request_response def %s.def" rep
+      | _ -> failwith "Multiple server replies not expected"
+    end;
+
+    if server then begin
       emit ~loc:__LINE__ "let request = (%s)"
-        ("def" :: (response |> List.concat_map ~f:(fun s -> Printf.sprintf "%s.def" s :: (id s))) |> String.concat ", ");
+        ("def" :: (response |> List.map ~f:(Printf.sprintf "%s.def")) |> String.concat ~sep:", ");
+
+      let responses = List.map ~f:(fun response -> sprintf "(%s.expect %s)" response (id response)) response in
+      emit ~loc:__LINE__ "let client_request = Service.client_request_response def [%s]"
+        (String.concat ~sep:"; " responses)
+    end;
   end;
   decr indent;
   emit "end";
@@ -457,14 +474,13 @@ let () =
   emit "(* %s %s %s %s *)" Sys.argv.(0) Sys.argv.(1) Sys.argv.(2) Sys.argv.(3);
   emit "(***********************************)";
   emit "";
-  emit "";
 
   begin
     match !output_type with
     | Constants ->
-      emit_constants tree;
-      ()
-    | Specification -> emit_specification tree
+      emit_constants tree
+    | Specification ->
+      emit_specification tree
   end;
   assert (!indent = 0);
   ()

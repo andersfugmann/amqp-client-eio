@@ -1,0 +1,40 @@
+name: Main workflow
+
+on:
+  - pull_request
+  - push
+
+jobs:
+  build:
+    services:
+      rabbitmq:
+        image: rabbitmq
+        ports:
+        - 5672/tcp
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+        ocaml-compiler:
+          - 5.0.0~alpha
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Use OCaml ${{ matrix.ocaml-compiler }}
+        uses: avsm/setup-ocaml@v2
+        with:
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
+
+      - run: opam pin . --no-action
+      - run: opam install amqp-client-eio --deps-only --with-doc --with-test
+      - run: opam exec -- dune runtest -p amqp-client-eio
+
+#      - run: opam exec -- dune build @integration -p amqp-client-eio
+#        env:
+#          AMQP_PORT: ${{ job.services.rabbitmq.ports[5672] }}

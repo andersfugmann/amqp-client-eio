@@ -1,12 +1,47 @@
-
 (** AMQP client connection *)
+
+(* Connection may be closed in three ways.
+
+   Client initiated:
+
+   1a. A message is send to the server requesting close
+   1b. The send stream is closed with 'closed by user'
+   2. The send steam is detected as closed and the send part of the flow is closed
+   3. The receive stream receives forwards close_ok to the channel 0 handler
+   4. The receive stream is closed by the server. The receive stream is closed and the thread exits.
+   5. The channel0 handler receives the close_ok, and closes all channels (And aborts all waiters)
+   6. the switch ends
+
+   Server initiated:
+   1. The receive thread forward Close message to the channel handler.
+   2. The receive channel get tcp closed and closes the receive thread (and flushes)
+   3a. The channel handler posts ok to the send thread
+   3b. The send channel is closed (with 'Closed by server')
+   3. Channel0 handler closes the receive channel
+   4. The channel0 notifies all waiters and raises 'Closed by server'
+
+   Tcp error on the receive stream:
+   1. The receive thread receives error and closes the receive stream
+   2. The frame demultiplexer closes the channel0 stream
+   3. The channel0 handler raises (or closes)
+   3. All waiters are closed
+
+   Tcp erro on the sender stream:
+   1. The sender stream encounters a tcp error.
+   2. The sender stream closes the send stream
+   3. The sender stream raises
+   4. All waiters are closed
+
+*)
+
 
 open StdLabels
 open Utils
 
 exception Closed of string
+exception Break_loop
 
-(* We can place framing in a seperate module, but is should only contain helper functions. *)
+
 let version = "0.0.1"
 let max_frame_size = 131072
 let max_channels = 2047
@@ -23,70 +58,63 @@ end
 
 type channel_stream = (Types.Frame_type.t * Cstruct.t) Stream.t
 type send_stream = Cstruct.t Stream.t
+type channel_info = { channel_no: int; send_stream: send_stream; frame_max: int }
 
 (** Add block / unblock *)
-type command = Register_channel of { channel_stream: channel_stream; promise: (int * send_stream) Promise.u }
+type command = Register_channel of { channel_stream: channel_stream; promise: channel_info Promise.u }
              | Deregister_channel of { channel_no: int; promise: unit Promise.u }
              | Close
              | Block
              | Unblock
 
 type t = {
-  send_stream: send_stream;
-  channels: channel_stream option array;
   command_stream: command Stream.t;
-  frame_max: int;
-  mutable next_channel: int;
-  mutable blocked: (unit Promise.t * unit Promise.u);
-  mutable close_reason: exn option;
 }
 
-let get_send_stream { send_stream; _ } = send_stream
-
-let handle_register_channel ({ channels; send_stream; next_channel; _ } as t) channel_stream promise =
-  let total_channels = Array.length channels in
+let handle_register_channel ~channels ~send_stream ~max_channels ~next_channel ~frame_max ~channel_stream promise =
   (* Find the next free channel no *)
   let rec find_next_free_channel idx = function
     | 0 -> failwith "No available channels"
     | n -> match channels.(idx) with
       | None -> idx
-      | Some _ -> find_next_free_channel ((idx + 1) mod total_channels) (n - 1)
+      | Some _ -> find_next_free_channel ((idx + 1) mod max_channels) (n - 1)
   in
-  let channel_no = find_next_free_channel next_channel total_channels in
+  let channel_no = find_next_free_channel next_channel max_channels in
   (* Store back the indicator for next possible free channel number *)
-  t.next_channel <- (channel_no mod total_channels);
-  t.channels.(channel_no) <- Some channel_stream;
-  Promise.resolve_ok promise (channel_no, send_stream)
+  channels.(channel_no) <- Some channel_stream;
+  Promise.resolve_ok promise { channel_no; send_stream; frame_max };
+  (channel_no + 1) mod max_channels
 
-let handle_deregister_channel {channels; _ } channel_no promise =
+let handle_deregister_channel channels channel_no promise =
   channels.(channel_no) <- None;
   Promise.resolve_ok promise ()
 
-let shutdown t reason =
+let shutdown ~blocked ~send_stream ~channels reason =
   (* Should we close the socket now... Yes! *)
-  Promise.resolve_exn (snd t.blocked) reason;
-  Stream.close t.send_stream reason;
-  Array.iter ~f:(function Some channel -> Stream.close channel reason | None -> ()) t.channels;
+  Promise.resolve_exn blocked reason;
+  Stream.close send_stream reason;
+  Array.iter ~f:(function Some channel -> Stream.close channel reason | None -> ()) channels;
   ()
 
-(* Will be terminated when / if any other fiber is closed *)
-let rec command_handler t =
-  let command =
-    try
-      Stream.receive t.command_stream
-    with reason ->
-      shutdown t reason;
-      raise reason;
+(** Command handler. User commands (and channel commands) are serialized though this. *)
+let command_handler ~command_stream ~service ~send_stream ~channels ~max_channels ~frame_max =
+  ignore service; (* We should use the service to handle incoming requests (e.g. close and block), and to send commands to the server *)
+  let rec loop next_channel =
+    let next_channel = match Stream.receive command_stream with
+      | Register_channel { channel_stream; promise } ->
+        handle_register_channel
+          ~channels ~send_stream ~max_channels ~frame_max ~next_channel ~channel_stream promise
+      | Deregister_channel { channel_no; promise } ->
+        handle_deregister_channel channels channel_no promise;
+        next_channel
+      | _ -> failwith "unsupported command"
+    in
+    loop next_channel
   in
-  let () =
-    match command with
-    | Register_channel { channel_stream; promise } ->
-      handle_register_channel t channel_stream promise
-    | Deregister_channel { channel_no; promise } ->
-      handle_deregister_channel t channel_no promise
-    | _ -> failwith "unsupported command"
-  in
-  command_handler t
+  try
+    loop 1
+  with
+  | Closed _ -> ()
 
 let send_command t command =
   Stream.send t.command_stream command
@@ -107,39 +135,9 @@ let deregister_channel t ~channel_no =
   send_command t command;
   Promise.await pt
 
-(* This function is purposefully not lifting partially applied functions, as its only called once and is not performance critical *)
-let direct_read: _ Protocol.Spec.def -> _ -> _ = fun Protocol.Spec.{ message_id; spec; make; _ } source ->
-  let reader = Protocol.Spec.read spec in
-  let (Framing.Frame_header.{ frame_type; channel; _ }, data) = Framing.read_frame source in
-  assert (Types.Frame_type.equal Types.Frame_type.Method frame_type);
-  assert (channel = 0);
-
-  let message_id', data = Framing.decode_method_header data in
-  assert (Types.Message_id.equal message_id message_id');
-  reader make data 0
-
-(* This function is purposefully not lifting partially applied functions, as its only called once and is not performance critical *)
-let direct_write: _ Protocol.Spec.def -> _ -> _ = fun def sink ->
-  let open Framing in
-  let send t =
-    let message = create_method_frame def ~channel_no:0  t in
-    Framing.write_data sink message
-  in
-  def.init send
-
-let reply_start flow ~id ~credentials =
+let handle_start_message ~id ~credentials ~version_major ~version_minor ~server_properties ~mechanisms ~locales () =
   let print_map map =
     List.iter ~f:(fun (k, v) -> printf " %s = " k; Types.print_type " " v; printf "\n";) map
-  in
-  let (start_def, start_ok_def) = Spec.Connection.Start.reply in
-
-  let Spec.Connection.Start.{
-    version_major;
-    version_minor;
-    server_properties;
-    mechanisms;
-    locales; } =
-    direct_read start_def flow
   in
   printf "Version: %d.%d\n" version_major version_minor;
   printf "Server properties:\n";
@@ -174,168 +172,207 @@ let reply_start flow ~id ~credentials =
       ]
   ]
   in
-  direct_write start_ok_def flow ~client_properties ~mechanism ~response ~locale ()
+  Spec.Connection.Start_ok.{
+    client_properties;
+    mechanism;
+    response;
+    locale;
+  }
 
-let reply_tune ?heartbeat flow =
-  let (tune_def, tune_ok_def) = Spec.Connection.Tune.reply in
 
-  let tune = direct_read tune_def flow in
-  let channel_max = Int.max max_channels tune.channel_max in
-  let frame_max = Int.max max_frame_size tune.frame_max in
+let handle_tune_message ?heartbeat ~max_frame_size ~channel_max ~frame_max ~heartbeat:tune_heartbeat () =
+  let channel_max = Int.max max_channels channel_max in
+  let frame_max = Int.max max_frame_size frame_max in
   let heartbeat = match heartbeat with
-    | None -> tune.heartbeat
-    | Some n -> n
+    | None -> tune_heartbeat
+    | Some heartbeat -> (Int.min tune_heartbeat !heartbeat)
   in
+  Spec.Connection.Tune_ok.{ channel_max; frame_max; heartbeat }
 
-  (* Produce a reply *)
-  direct_write tune_ok_def flow ~channel_max ~frame_max ~heartbeat ();
-  (channel_max, frame_max, heartbeat)
+(*
+let handle_channel0_messages service ~blocked () =
+  let handle_blocked = Framing.server_request_reply Spec.Connection.Blocked.request ~channel_no:0 (fun () -> ()) in
 
-let request_open flow ~virtual_host =
-  let (open_def, open_ok_def) = Spec.Connection.Open.request in
-  direct_write open_def flow ~virtual_host ();
-  let t = direct_read open_ok_def flow in
-  t
 
-(** Handle connection messages *)
-let handle_connection_message t frame_type data =
-  let close_id, close_f = Framing.server_request_response Spec.Connection.Close.reply in
-  match frame_type with
-  | Types.Frame_type.Heartbeat ->
-    (* Happy times. We received a heartbeat *)
-    ()
-  | Content_header
-  | Content_body ->
-    failwith "Channel 0 should never receive content messages"
-  | Method ->
-    begin
-      let message_id, data = Framing.decode_method_header data in
-      match message_id with
-      | message_id when Types.Message_id.equal message_id Spec.Connection.Blocked.message_id ->
+
+  Service.register_service service  Framing.{ message_ids = [ Spec.Connection.Blocked.message_id ];
+*)
+
+let _x =
+  Service.client_request_response Spec.Basic.Consume.def [(Spec.Basic.Consume_ok.expect (fun id -> id))]
+
+
+(** Handle connection messages. Create a more generic system for handling incoming messages. *)
+let handle_connection_messages service receive_stream _command_stream =
+  let rec loop () =
+    let () =
+      match Stream.receive receive_stream with
+      | Types.Frame_type.Heartbeat, _data ->
+        (* TODO: We ought to record the timestamp of the last received message, and have the heartbeat thread
+           check if we received any messages. Its somewhat annoying that we need mutability though.
+        *)
         ()
-      | message_id when Types.Message_id.equal message_id Spec.Connection.Unblocked.message_id ->
-        ()
-      | message_id when Types.Message_id.equal message_id close_id ->
-        let close_connection t message =
-          let reason =
-            match message with
-            | Spec.Connection.Close.{ reply_code; reply_text; class_id = 0; method_id = 0 } ->
-              Printf.sprintf "%d: %s" reply_code reply_text
-            | { reply_code; reply_text; class_id; method_id } ->
-              Printf.sprintf "%d: Server terminated connection due to protocol failure. Text: %s. Offending message id: (%d, %d)" reply_code reply_text class_id method_id;
+      | Content_header, _data
+      | Content_body, _data ->
+        failwith "Channel 0 should never receive content messages"
+      | Method, data ->
+        Service.handle_method service data
+    in
+    loop ()
+  (*
+      begin
+        let message_id, data = Framing.decode_method_header data in
+        match message_id with
+        | message_id when Types.Message_id.equal message_id Spec.Connection.Blocked.message_id ->
+          () (* Should send a command to block the send stream *)
+        | message_id when Types.Message_id.equal message_id Spec.Connection.Unblocked.message_id ->
+          ()
+        | message_id when Types.Message_id.equal message_id close_id ->
+          let close_connection message =
+            let reason =
+              match message with
+              | Spec.Connection.Close.{ reply_code; reply_text; class_id = 0; method_id = 0 } ->
+                Printf.sprintf "%d: %s" reply_code reply_text
+              | { reply_code; reply_text; class_id; method_id } ->
+                Printf.sprintf "%d: Server terminated connection due to protocol failure. Text: %s. Offending message id: (%d, %d)" reply_code reply_text class_id method_id;
+            in
+            Stream.close command_stream (Closed reason);
           in
-          Stream.close t.command_stream (Closed reason);
-        in
-        close_f ~stream:t.send_stream ~channel_no:0 data (fun init close -> close_connection t close; init ());
-      | _ -> failwith "Unknown message on channel 0"
-    end
-
-let rec receive_messages t flow =
-  let (frame_header, data) =
-    try
-      Framing.read_frame flow
-    with _ ->
-      let exn = Closed "Network connection terminated" in
-      Stream.close t.command_stream exn;
-      raise exn
+          close_f ~stream:send_stream ~channel_no:0 data (fun mk close_reason -> close_connection close_reason; mk);
+     ()
+    | _ -> failwith "Unknown message on channel 0"
+     end;
+     loop ()
+  *)
   in
-  let () =
-    match frame_header.channel with
-    | 0 ->
-      (* I think a channel would be more suited here! - but we can post message to a function if needed *)
-      handle_connection_message t frame_header.frame_type data
-    | n ->
-      match t.channels.(n) with
+  try
+    loop ()
+  with exn ->
+    Eio.traceln "Handle connection messages terminated with exn: %s" (Printexc.to_string exn);
+    raise exn
+
+(** Receive messages.
+    If a TCP error is encountered the channel0 stream is closed and the function exits
+    If the receive stream is closed, the receive flow is closed and the function exits
+*)
+let receive_messages flow channels =
+  let rec loop () =
+    let (frame_header, data) = Framing.read_frame flow in
+    let () =
+      match channels.(frame_header.channel) with
       | None -> (* Do some error handling of the message - we dont know it *)
-        Log.error "Data received on closed channel: %d" n;
+        failwith_f "Data received on non-existing channel: %d" frame_header.channel
       | Some channel ->
-        (* The connection stream should never close *)
-        try
-          Stream.send channel (frame_header.frame_type, data)
-        with _ ->
-          failwith "Channels should not be closed before removing!"
+        Stream.send channel (frame_header.frame_type, data)
+    in
+    loop ()
   in
-  receive_messages t flow
+  try
+    loop ()
+  with
+  | End_of_file ->
+    let exn = Closed "Connection terminated" in
+    Stream.close (Option.get channels.(0)) exn
+  | Closed _ as exn ->
+    Eio.Flow.shutdown flow `Receive;
+    failwith_f "Channel closed with reason: %s" (Printexc.to_string exn)
 
-let rec send_messages t flow =
-  let frame =
-    try
-      Stream.receive t.send_stream
-    with
-    | exn ->
-      (* Someone closed the stream. Just exit *)
-      Eio.Flow.shutdown flow `Send;
-      raise exn (* We don't really need to raise tbh *)
+let send_messages flow send_stream =
+  Framing.write_protocol_header flow;
+  (* We should handle exceptions here! *)
+  let rec loop () =
+    let frame = Stream.receive send_stream in
+    Framing.write_data flow frame;
+    loop ()
   in
-  let () =
-    try
-      Framing.write_data flow frame
-    with _ ->
-      let exn = Closed "Network connection terminated" in
-      Stream.close ~notify_consumers:false ~flush:true t.send_stream exn;
-      Stream.close ~notify_consumers:true ~flush:false t.command_stream exn;
-      raise exn
-  in
-  send_messages t flow
+  try
+    loop ()
+  with
+  | End_of_file ->
+    let exn = Closed "Network connection terminated" in
+    Stream.close send_stream exn
+  | Closed _ as exn ->
+    Eio.traceln "Send stream closed with exn: %s\n%!" (Printexc.to_string exn);
+    Eio.Flow.shutdown flow `Send
 
 (** Continuously send a heartbeat frame every [freq] / 2 *)
-let rec send_heartbeat ~clock stream freq =
+let send_heartbeat ~clock stream freq =
   (* Should verify that there has been a message from the server withing [freq] seconds, or terminate the connection if not. *)
-  let freq' = Float.of_int freq /. 2.0 in
+  let freq = Float.of_int freq /. 2.0 in
+  let rec loop () =
+    Eio.Time.sleep clock freq;
+    (* Only send if the stream is empty. We could optimize this to
+       record last send, and only send when idle.
+    *)
+    if Stream.is_empty stream; then
+      Stream.send stream Framing.heartbeat_frame;
 
-  Eio.Time.sleep clock freq';
-  (* Only send if the stream is empty. We could optimize this to
-     record last send, and only send when idle.
-  *)
-  if Stream.is_empty stream; then
-    Stream.send stream Framing.heartbeat_frame;
-
-  send_heartbeat ~clock stream freq
+    loop ()
+  in
+  try
+    loop ()
+  with
+  | exn -> Eio.traceln "Heartbeat thread terminated with exn: %s\n%!" (Printexc.to_string exn);
+    ()
 
 
 (** Create a channel to amqp *)
-let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_stream_length=5) ?(credentials=Credentials.default) ?(port=5672) host =
-
-  let addr = Eio_unix.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
-  let net : #Eio.Net.t = Eio.Stdenv.net env in
-  let flow = Eio.Net.connect ~sw net (`Tcp (addr, port)) in
-
-  (* Move flow somewhere else *)
-  (* Use the send and receive handler *)
-
-  (* Move to the send stream. Send protocol header *)
-  Framing.write_protocol_header flow;
-
-  let () = reply_start flow ~id ~credentials in
-  let (channel_max, frame_max, heartbeat_freq) = reply_tune ?heartbeat flow in
-
-  (* Start thread to send heartbeats. *)
-  let send_stream = Stream.create ~max_size:max_stream_length () in
-  let () = request_open flow ~virtual_host in
-
-  let t = { send_stream;
-            channels = Array.make channel_max None;
-            command_stream = Stream.create ~max_size:1 ();
-            frame_max;
-            next_channel = 1;
-            blocked = Promise.create ();
-            close_reason = None;
-          }
-  in
-
+let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_size) ?(max_stream_length=5) ?(credentials=Credentials.default) ?(port=5672) host =
+  (* We need to put everything within a switch. We obtain t though a promise.*)
+  let command_stream = Stream.create ~capacity:1 () in
   Eio.Fiber.fork_sub
     ~sw
-    ~on_error:(fun exn ->
-      Printf.printf "Connection closed: %s\n%!" (Printexc.to_string exn);
-      match t.close_reason with None -> t.close_reason <- Some exn | Some _ -> ())
+    ~on_error:(fun exn -> Eio.traceln "Connection closed: %s\n%!" (Printexc.to_string exn))
     (fun sw ->
        let clock = Eio.Stdenv.clock env in
-       Eio.Fiber.fork ~sw (fun () -> try send_messages t flow with exn -> Printf.printf "Send message closed: %s\n%!" (Printexc.to_string exn));
-       Eio.Fiber.fork ~sw (fun () -> try receive_messages t flow with exn -> Printf.printf "Receive message closed: %s\n%!" (Printexc.to_string exn));
 
-       Eio.Fiber.fork ~sw (fun () -> try send_heartbeat ~clock send_stream heartbeat_freq with exn -> Printf.printf "Heartbeat closed: %s\n%!" (Printexc.to_string exn));
+       let addr = Eio_unix.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
+       let net : #Eio.Net.t = Eio.Stdenv.net env in
+       let flow = Eio.Net.connect ~sw net (`Tcp (addr, port)) in
 
-       Eio.Fiber.fork ~sw (fun () -> try command_handler t with exn -> Printf.printf "Command handler closed: %s\n%!" (Printexc.to_string exn); raise exn);
+       (* Create the streams *)
+       let send_stream = Stream.create ~capacity:max_stream_length () in
 
+       (* We just create max_channels. If the peer allows less, we waste a little memory *)
+       let channels = Array.make max_channels None in
+
+       (* Register channel 0 to handle messages *)
+       let channel0_stream = Stream.create () in
+       channels.(0) <- Some channel0_stream;
+       Eio.Fiber.fork ~sw (fun () -> send_messages flow send_stream);
+       Eio.Fiber.fork ~sw (fun () -> receive_messages flow channels);
+
+       let service = Service.init ~send_stream ~receive_stream:channel0_stream ~channel_no:0 () in
+       Eio.Fiber.fork ~sw (fun () -> handle_connection_messages service channel0_stream command_stream);
+
+
+       (* Now register the functions to handle messages *)
+       let (_req, _res) =
+         Service.server_request_response_oneshot (fst Spec.Connection.Start.reply) (snd Spec.Connection.Start.reply) service
+         ((fst Spec.Connection.Start.reply).apply_named (handle_start_message ~id ~credentials))
+       in
+       Eio.traceln "Reply start";
+
+       let (_, Spec.Connection.Tune_ok.{ channel_max; frame_max; heartbeat }) =
+         Service.server_request_response_oneshot (fst Spec.Connection.Tune.reply) (snd Spec.Connection.Tune.reply) service
+         ((fst Spec.Connection.Tune.reply).apply_named (handle_tune_message ?heartbeat ~max_frame_size))
+       in
+
+       Eio.traceln "Tune start";
+       let () = Service.client_request_response (fst Spec.Connection.Open.request) [ Service.expect_method (snd Spec.Connection.Open.request) (fun id -> id)]
+           service Spec.Connection.Open.{ virtual_host }
+       in
+
+       Eio.traceln "Connection open";
+
+       (* Start sending heartbeats, and monitor for missing heartbeats *)
+       Eio.Fiber.fork ~sw (fun () -> send_heartbeat ~clock send_stream heartbeat);
+
+       Eio.Fiber.fork ~sw
+         (fun () -> try
+             command_handler ~command_stream ~send_stream ~service ~channels ~max_channels:channel_max ~frame_max
+           with exn -> Eio.traceln "Command handler closed: %s: %s" (Printexc.to_string exn) (Printexc.get_backtrace ()); raise exn);
+
+       ()
     );
-  t
+  { command_stream }

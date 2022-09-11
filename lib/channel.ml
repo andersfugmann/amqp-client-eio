@@ -223,7 +223,6 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
 
        Spec.Channel.Open.client_request service ();
 
-
        (* Enable message confirms *)
        if t.confirms_enabled then Spec.Confirm.Select.(client_request service { nowait = false });
 

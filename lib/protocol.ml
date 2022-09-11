@@ -281,6 +281,9 @@ module Spec = struct
     apply_named: 'apply_named -> 't -> 'apply_named_result;
   }
 
+  type _ edef = Def: ('t, _, _, _, _, _, _, _, _, _) def -> 't edef
+
+
 
   let rec read: type b c. (b, c) spec -> b -> Cstruct.t -> int -> c = function
     | (Bit :: _) as spec ->
@@ -397,6 +400,9 @@ module Content = struct
     apply: 'apply -> 't -> 'apply_result; (* (a -> b -> c) -> t -> c *)
     apply_named: 'apply_named -> 't -> 'apply_named_result;
   }
+
+  type _ edef = Def: ('t, _, _, _, _, _, _, _, _, _) def -> 't edef
+
 
   let rec elements: type a b. (a, b) spec -> int = function
     | _ :: tail -> 1 + elements tail

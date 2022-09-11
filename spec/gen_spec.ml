@@ -329,12 +329,11 @@ let emit_method ?(is_content=false) class_index
 
   let apply = sprintf "fun f %s -> f %s" t_args values in
 
-  let apply_named = match types, is_content with
-    | [], _ -> sprintf "fun f -> f"
-    | _, true ->
-      sprintf "fun f %s -> f %s ()" t_args (List.map ~f:(fun n -> "?" ^ n) inames |> String.concat ~sep:" ")
-    | _, false ->
-      sprintf "fun f %s -> f %s ()" t_args (List.map ~f:(fun n -> "~" ^ n) inames |> String.concat ~sep:" ")
+  let apply_named = match types with
+    | [] -> sprintf "fun f -> f"
+    | _ ->
+      let access = match is_content with true -> "?" | false -> "~" in
+      sprintf "fun f %s -> f %s ()" t_args (List.map ~f:(fun n -> access ^ n) inames |> String.concat ~sep:" ")
   in
 
   emit_loc __LINE__;
@@ -370,19 +369,16 @@ let emit_method ?(is_content=false) class_index
       | _ -> "(fun m -> `" ^ r ^ " m)"
     in
     if client && not content then begin
-      emit ~loc:__LINE__ "let reply = (%s)"
-        ("def" :: (response |> List.map ~f:(Printf.sprintf "%s.def")) |> String.concat ~sep:", ");
-
       match response with
       | [] -> emit ~loc:__LINE__ "let server_request = Service.server_request def"
-      | [rep] -> emit ~loc:__LINE__ "let server_request_reply = Service.server_request_response def %s.def" rep
+      | [rep] ->
+        emit ~loc:__LINE__ "let server_request = Service.server_request_response def %s.def" rep;
+        emit ~loc:__LINE__ "let server_request_oneshot = Service.server_request_response_oneshot def %s.def" rep;
+        ()
       | _ -> failwith "Multiple server replies not expected"
     end;
 
     if server then begin
-      emit ~loc:__LINE__ "let request = (%s)"
-        ("def" :: (response |> List.map ~f:(Printf.sprintf "%s.def")) |> String.concat ~sep:", ");
-
       let responses = List.map ~f:(fun response -> sprintf "(%s.expect %s)" response (id response)) response in
       emit ~loc:__LINE__ "let client_request = Service.client_request_response def [%s]"
         (String.concat ~sep:"; " responses)

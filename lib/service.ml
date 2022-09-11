@@ -182,8 +182,9 @@ let deregister_service: _ Protocol.Spec.def -> t -> unit = fun def t ->
   Message_table.remove t.services def.message_id
 
 (** Expect only one request from the server and deregister
-    the service handler immediatly after receiving the request.
-    The function will block until a request has been received and return the request/response pair *)
+    the service handler immediately after receiving the request.
+    The function will block until a request has been received and
+    return the request/response pair *)
 let server_request_response_oneshot:
   ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
   ('res, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->

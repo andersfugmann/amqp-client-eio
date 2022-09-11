@@ -213,8 +213,8 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
        Service.server_request Spec.Basic.Deliver.def service (handle_deliver t);
        Spec.Basic.Ack.server_request service (handle_ack handle_confirm);
        Spec.Basic.Nack.server_request service (handle_nack handle_confirm);
-       Spec.Channel.Close.server_request_reply service (handle_close t);
-       Spec.Channel.Flow.server_request_reply service (handle_flow t);
+       Spec.Channel.Close.server_request service (handle_close t);
+       Spec.Channel.Flow.server_request service (handle_flow t);
 
        (* TODO: Handle returns *)
 

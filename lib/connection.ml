@@ -189,19 +189,6 @@ let handle_tune_message ?heartbeat ~max_frame_size ~channel_max ~frame_max ~hear
   in
   Spec.Connection.Tune_ok.{ channel_max; frame_max; heartbeat }
 
-(*
-let handle_channel0_messages service ~blocked () =
-  let handle_blocked = Framing.server_request_reply Spec.Connection.Blocked.request ~channel_no:0 (fun () -> ()) in
-
-
-
-  Service.register_service service  Framing.{ message_ids = [ Spec.Connection.Blocked.message_id ];
-*)
-
-let _x =
-  Service.client_request_response Spec.Basic.Consume.def [(Spec.Basic.Consume_ok.expect (fun id -> id))]
-
-
 (** Handle connection messages. Create a more generic system for handling incoming messages. *)
 let handle_connection_messages service receive_stream _command_stream =
   let rec loop () =
@@ -315,6 +302,9 @@ let send_heartbeat ~clock stream freq =
   | exn -> Eio.traceln "Heartbeat thread terminated with exn: %s\n%!" (Printexc.to_string exn);
     ()
 
+let handle_blocked _ = failwith "Not implemented"
+let handle_unblocked _ = failwith "Not implemented"
+let handle_close _ = failwith "Not implemented"
 
 (** Create a channel to amqp *)
 let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_size) ?(max_stream_length=5) ?(credentials=Credentials.default) ?(port=5672) host =
@@ -343,27 +333,26 @@ let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_
        Eio.Fiber.fork ~sw (fun () -> receive_messages flow channels);
 
        let service = Service.init ~send_stream ~receive_stream:channel0_stream ~channel_no:0 () in
+       Spec.Connection.Blocked.server_request service handle_blocked;
+       Spec.Connection.Unblocked.server_request service handle_unblocked;
+       Spec.Connection.Close.server_request service handle_close;
+
        Eio.Fiber.fork ~sw (fun () -> handle_connection_messages service channel0_stream command_stream);
 
 
        (* Now register the functions to handle messages *)
        let (_req, _res) =
-         Service.server_request_response_oneshot (fst Spec.Connection.Start.reply) (snd Spec.Connection.Start.reply) service
-         ((fst Spec.Connection.Start.reply).apply_named (handle_start_message ~id ~credentials))
+         Spec.Connection.Start.server_request_oneshot service
+         (Spec.Connection.Start.def.apply_named (handle_start_message ~id ~credentials))
        in
-       Eio.traceln "Reply start";
+       Eio.traceln "Start Done";
 
        let (_, Spec.Connection.Tune_ok.{ channel_max; frame_max; heartbeat }) =
-         Service.server_request_response_oneshot (fst Spec.Connection.Tune.reply) (snd Spec.Connection.Tune.reply) service
-         ((fst Spec.Connection.Tune.reply).apply_named (handle_tune_message ?heartbeat ~max_frame_size))
+         Spec.Connection.Tune.server_request_oneshot service
+           (Spec.Connection.Tune.def.apply_named (handle_tune_message ?heartbeat ~max_frame_size))
        in
-
-       Eio.traceln "Tune start";
-       let () = Service.client_request_response (fst Spec.Connection.Open.request) [ Service.expect_method (snd Spec.Connection.Open.request) (fun id -> id)]
-           service Spec.Connection.Open.{ virtual_host }
-       in
-
-       Eio.traceln "Connection open";
+       Eio.traceln "Tune Done";
+       Spec.Connection.Open.client_request service Spec.Connection.Open.{ virtual_host };
 
        (* Start sending heartbeats, and monitor for missing heartbeats *)
        Eio.Fiber.fork ~sw (fun () -> send_heartbeat ~clock send_stream heartbeat);

@@ -26,7 +26,7 @@ type message_reply = { message_id: message_id;
                        promise: (Cstruct.t * Framing.content option) Promise.u;
                      }
 
-type deliver = Spec.Basic.Deliver.t * Framing.content
+type deliver = Spec.Basic.Deliver.t * Message.t
 
 type 'a command =
   | Send_request of { message: Cstruct.t list; replies: message_reply list }
@@ -118,13 +118,14 @@ let shutdown t reason =
   Hashtbl.iter (fun _key stream -> Stream.close stream reason) t.consumers;
   ()
 
-(* We should consider how we merge the CStructs *)
-let handle_deliver: _ t -> Spec.Basic.Deliver.t -> unit = fun t deliver ->
-  (* Ok. Deliver has been read. Now read content *)
-  let content = Framing.read_content t.receive_stream in
+let handle_return: _ t -> Spec.Basic.Return.t -> Spec.Basic.Content.t -> Cstruct.t list -> unit = fun t return content body ->
+  ignore (t, return, content, body);
+  failwith "Not implemented"
+
+let handle_deliver: _ t -> Spec.Basic.Deliver.t -> Spec.Basic.Content.t -> Cstruct.t list -> unit = fun t deliver content body ->
 
   match Hashtbl.find_opt t.consumers deliver.consumer_tag with
-  | Some stream -> Stream.send stream (deliver, content)
+  | Some stream -> Stream.send stream (deliver, (content, body))
   | None -> failwith "Could not find consumer for delivered message"
 
 let handle_confirm: type a. a confirms -> a t -> _ = fun confirm t ->
@@ -210,13 +211,12 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
 
        let handle_confirm = handle_confirm confirm_type t in
        (* Setup the service *)
-       Service.server_request Spec.Basic.Deliver.def service (handle_deliver t);
+       Spec.Basic.Deliver.server_request service (handle_deliver t);
        Spec.Basic.Ack.server_request service (handle_ack handle_confirm);
        Spec.Basic.Nack.server_request service (handle_nack handle_confirm);
        Spec.Channel.Close.server_request service (handle_close t);
        Spec.Channel.Flow.server_request service (handle_flow t);
-
-       (* TODO: Handle returns *)
+       Spec.Basic.Return.server_request service (handle_return t);
 
        (* Start handling messages before channel open *)
        Eio.Fiber.fork ~sw (fun () -> consume_messages t);

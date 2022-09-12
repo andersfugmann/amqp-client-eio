@@ -76,6 +76,8 @@ let write_protocol_header flow =
   Printf.printf "\n%!";
   Eio.Flow.copy_string protocol_header flow
 
+(* When receiving the body, we could hold partially received data. This allows us to do zero copy.
+   However, it means that we need obtain the size of the body content by decoding the content header *)
 let read_frame source =
   read_data source Frame_header.buffer;
   (* Decode the header *)

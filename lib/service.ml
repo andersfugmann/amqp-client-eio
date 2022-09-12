@@ -15,6 +15,7 @@ open Utils
 module Message_table = Hashtbl.Make(Types.Message_id)
 
 type expect = (Types.Message_id.t * Cstruct.t, exn) result -> unit
+type 'a content = { content: 'a; body : Cstruct.t list }
 
 type t = {
   send_stream: Cstruct.t Stream.t;
@@ -150,7 +151,8 @@ let client_request_response:
     f ()
 
 let server_request:
-  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def -> t -> ('req -> unit) -> unit = fun req ->
+  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  t -> ('req -> unit) -> unit = fun req ->
   let decode_request = Framing.decode_method req in
   let handler f data =
     decode_request data
@@ -158,6 +160,26 @@ let server_request:
   in
   fun t f ->
     Message_table.add t.services req.message_id (handler f)
+
+
+(* Content will not be decoded *)
+let server_request_content:
+  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('content, _, _, _, _, _, _, _, _, _) Protocol.Content.def ->
+  t -> ('req -> 'content -> Cstruct.t list -> unit) -> unit = fun req content ->
+  let decode_request = Framing.decode_method req in
+  let decode_content = Framing.decode_content content in
+  let handler t f data =
+    let request = decode_request data in
+    let content, body =
+      Framing.read_content t.receive_stream
+      |> decode_content
+    in
+    f request content body
+  in
+  fun t f ->
+    Message_table.add t.services req.message_id (handler t f)
+
 
 let server_request_response:
   ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->

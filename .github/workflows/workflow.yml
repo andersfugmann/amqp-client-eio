@@ -18,7 +18,7 @@ jobs:
         os:
           - ubuntu-latest
         ocaml-compiler:
-          - 5.0.0
+          - 5.0.x
 
     runs-on: ${{ matrix.os }}
 
@@ -30,11 +30,12 @@ jobs:
         uses: avsm/setup-ocaml@v2
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
+          dune-cache: true
 
-      - run: opam pin . --no-action
-      - run: opam install amqp-client-eio --deps-only --with-doc --with-test
-      - run: opam exec -- dune runtest -p amqp-client-eio
+      - run: opam install . --deps-only --with-test
+      - run: opam exec -- dune build
+      - run: opam exec -- dune runtest
 
-#      - run: opam exec -- dune build @integration -p amqp-client-eio
-#        env:
-#          AMQP_PORT: ${{ job.services.rabbitmq.ports[5672] }}
+#     - run: opam exec -- dune build @integration -p amqp-client-eio
+#       env:
+#         AMQP_PORT: ${{ job.services.rabbitmq.ports[5672] }}

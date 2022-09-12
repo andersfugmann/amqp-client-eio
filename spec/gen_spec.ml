@@ -368,9 +368,11 @@ let emit_method ?(is_content=false) class_index
       | [] | [_]-> "(fun id -> id)"
       | _ -> "(fun m -> `" ^ r ^ " m)"
     in
-    if client && not content then begin
+    if client then begin
       match response with
+      | [] when content -> emit ~loc:__LINE__ "let server_request = Service.server_request_content def Content.def"
       | [] -> emit ~loc:__LINE__ "let server_request = Service.server_request def"
+      | _ when content -> failwith "Content server requests expecting a reply is not supported"
       | [rep] ->
         emit ~loc:__LINE__ "let server_request = Service.server_request_response def %s.def" rep;
         emit ~loc:__LINE__ "let server_request_oneshot = Service.server_request_response_oneshot def %s.def" rep;

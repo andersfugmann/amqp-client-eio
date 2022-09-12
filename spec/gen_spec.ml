@@ -363,7 +363,7 @@ let emit_method ?(is_content=false) class_index
   in
   (* Emit call definitions *)
   let response = List.map ~f:variant_name response in
-  if ((synchronous && response != []) || not synchronous) then begin
+  if (response != [] || not synchronous) then begin
     let id r = match response with
       | [] | [_]-> "(fun id -> id)"
       | _ -> "(fun m -> `" ^ r ^ " m)"

@@ -1,6 +1,7 @@
 (** Channel. Functions for dispatching messages *)
-open Types
 open StdLabels
+module Queue = Stdlib.Queue
+open Types
 open Utils
 
 type _ confirms =
@@ -26,12 +27,23 @@ type message_reply = { message_id: message_id;
                        promise: (Cstruct.t * Framing.content option) Promise.u;
                      }
 
-type deliver = Spec.Basic.Deliver.t * Message.t
+module Message = struct
+  type content = Spec.Basic.Content.t * Cstruct.t list
+
+  type t =
+    { delivery_tag : int;
+      redelivered : bool;
+      exchange : string;
+      routing_key : string;
+      content: content;
+    }
+end
+type deliver = Spec.Basic.Deliver.t * Message.content
 
 type 'a command =
   | Send_request of { message: Cstruct.t list; replies: message_reply list }
   (** Send a request, and wait for replies of the listed message types *)
-  | Publish of { message: Cstruct.t list; ack: 'a Promise.u option }
+  | Publish of { data: Cstruct.t list; ack: 'a Promise.u option }
   (** Publish a message. When publisher confirms are enabled, the promise will be fulfilled when ack | nack is received.
       If not in ack mode, the given promise will be fullfilled immediately. Alternatively client can use Send_request instead *)
   | Register_consumer of { consumer_tag: consumer_tag; stream: deliver Stream.t; promise: (unit, [ `Consumer_already_registered of string]) Result.t Promise.u; }
@@ -48,6 +60,7 @@ type 'a t = {
   command_stream: 'a command Stream.t; (** Communicate commands *)
   frame_max: int;
   service: Service.t;
+  ok: 'a;
   mutable acks: (int * 'a Promise.u) Mlist.t;
   waiters: (message_reply list) Queue.t; (** Users waiting for Replies. This should be a map. *)
   consumers: (consumer_tag, deliver Stream.t) Hashtbl.t;
@@ -61,16 +74,24 @@ type 'a with_confirms = 'a confirm -> 'a t
   constraint 'a = [< `Ok | `Rejected ]
 
 
+let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
+  match t.confirms_enabled with
+  | true ->
+    let p, u = Promise.create () in
+    Stream.send t.command_stream (Publish { data; ack=Some u });
+    Promise.await p
+  | false ->
+    Stream.send t.command_stream (Publish { data; ack=None });
+    t.ok
+
 let rec handle_commands t =
   let () =
     match Stream.receive t.command_stream with
     | Send_request { message; replies }  ->
       Queue.push replies t.waiters;
       List.iter ~f:(Stream.send t.send_stream) message;
-    | Publish { message; ack }  ->
-      (* Only send when flow is enabled *)
-      let () = Eio.Promise.await_exn (fst t.flow) in
-      List.iter ~f:(Stream.send t.send_stream) message;
+    | Publish { data; ack }  ->
+      List.iter ~f:(Stream.send t.send_stream) data;
       begin
         match t.confirms_enabled, ack with
         | false, None -> ()
@@ -193,6 +214,7 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
     command_stream = Stream.create ~capacity:1 ();
     frame_max;
     service;
+    ok = `Ok;
     (* When we close a stream, we try to post a message. This is problematic if the consumer trues to close => deadlock. *)
     (* So how do we close a stream? *)
     acks = Mlist.create ();
@@ -224,7 +246,7 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
        Spec.Channel.Open.client_request service ();
 
        (* Enable message confirms *)
-       if t.confirms_enabled then Spec.Confirm.Select.(client_request service { nowait = false });
+       if t.confirms_enabled then Spec.Confirm.Select.(client_request service ~nowait:false ());
 
        Eio.Fiber.fork ~sw (fun () -> try handle_commands t with _ -> ());
     );

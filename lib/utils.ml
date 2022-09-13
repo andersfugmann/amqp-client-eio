@@ -1,4 +1,5 @@
 open !StdLabels
+module Queue = Stdlib.Queue
 
 let failwith_f fmt = Printf.ksprintf (fun s -> failwith s) fmt
 let log fmt = Printf.printf (fmt ^^ "\n%!")

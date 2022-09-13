@@ -8,6 +8,7 @@
 
 
 open! StdLabels
+module Queue = Stdlib.Queue
 open Utils
 
 (* Need a list of waiters. We should be able to front and back insert on this,
@@ -107,8 +108,8 @@ let rec list_assoc_map: ('key * 'data) list -> key:'key -> f:('data -> 'b) -> de
     This function is thread safe.
 *)
 let client_request_response:
-  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
-  (Types.message_id * 'res response) list -> t -> 'req -> 'res = fun req ress ->
+  ('req, _, _, _, 'make_named, 'res, _, _, _, _) Protocol.Spec.def ->
+  (Types.message_id * 'res response) list -> t -> 'make_named = fun req ress ->
   let create_request = Framing.create_method_frame req in
   let handlers = list_assoc_map ress in
   let handler t data = function
@@ -143,12 +144,16 @@ let client_request_response:
       Stream.send t.send_stream request
   in
 
-  fun t req ->
+  let call t req =
     let u, p = Promise.create () in
     let request = create_request ~channel_no:t.channel_no req in
     send_request t p request;
     let f = Promise.await u in
     f ()
+  in
+  fun t ->
+    req.make_named (call t)
+
 
 let server_request:
   ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->

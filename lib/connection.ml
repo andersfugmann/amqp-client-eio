@@ -36,6 +36,7 @@
 
 
 open StdLabels
+module Queue = Stdlib.Queue
 open Utils
 
 exception Closed of string
@@ -352,7 +353,7 @@ let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_
            (Spec.Connection.Tune.def.apply_named (handle_tune_message ?heartbeat ~max_frame_size))
        in
        Eio.traceln "Tune Done";
-       Spec.Connection.Open.client_request service Spec.Connection.Open.{ virtual_host };
+       Spec.Connection.Open.client_request service ~virtual_host ();
 
        (* Start sending heartbeats, and monitor for missing heartbeats *)
        Eio.Fiber.fork ~sw (fun () -> send_heartbeat ~clock send_stream heartbeat);

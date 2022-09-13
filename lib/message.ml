@@ -1,1 +1,54 @@
-type t = Spec.Basic.Content.t * Cstruct.t list
+open !StdLabels
+open Types
+
+
+let string_header key value = key, Types.VLongstr value
+let int_header key value = key, Types.VLonglong value
+
+include Channel.Message
+type content = Channel.Message.content
+type t = Channel.Message.t
+
+let make
+    ?(content_type:string option)
+    ?(content_encoding: string option)
+    ?(headers: Types.table option)
+    ?(delivery_mode: int option)
+    ?(priority: int option)
+    ?(correlation_id: string option)
+    ?(reply_to: string option)
+    ?(expiration: int option)
+    ?(message_id: string option)
+    ?(timestamp: int option)
+    ?(amqp_type: string option)
+    ?(user_id: string option)
+    ?(app_id: string option)
+    body : content =
+
+
+  ({Spec.Basic.Content.
+     content_type;
+     content_encoding;
+     headers;
+     delivery_mode;
+     priority;
+     correlation_id;
+     reply_to;
+     expiration = Option.map string_of_int expiration;
+     message_id = (message_id : string option);
+     timestamp;
+     amqp_type;
+     user_id;
+     app_id;
+     reserved = None;
+   }, body)
+
+
+let ack: _ Channel.t -> ?multiple:bool -> t -> unit = fun channel ?(multiple=false) t ->
+  Spec.Basic.Ack.client_request channel.service ~delivery_tag:t.delivery_tag ~multiple ()
+
+let reject: _ Channel.t -> ?multiple:bool -> requeue:bool -> t -> unit = fun channel ?(multiple=false) ~requeue t ->
+  Spec.Basic.Nack.client_request channel.service ~delivery_tag:t.delivery_tag ~multiple ~requeue ()
+
+let recover: _ Channel.t -> requeue:bool -> unit = fun channel ~requeue ->
+  Spec.Basic.Recover.client_request channel.service ~requeue ()

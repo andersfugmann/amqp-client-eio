@@ -1,5 +1,7 @@
 (** Basic Amqp types *)
 type message_id = { class_id: int; method_id: int }
+
+
 module Message_id = struct
   type t = message_id
   let compare { class_id = a; method_id = b} { class_id = a'; method_id = b'} =

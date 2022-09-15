@@ -25,7 +25,9 @@ module Frame_end = struct
   let read = Protocol.Spec.read spec make
   let write =
     let writer = Protocol.Spec.write spec in
-    fun data off () -> writer data off Constants.frame_end
+    fun data off ->
+      let (_ : int) = writer data off Constants.frame_end in
+      ()
 end
 
 module Method_header = struct
@@ -59,13 +61,13 @@ let read_data source buffer =
   Eio.Flow.read_exact source buffer;
   let hex_buf = Buffer.create 100 in
   Cstruct.hexdump_to_buffer hex_buf buffer;
-  (* Eio.traceln "Read: (%d): %s" (Cstruct.length buffer) (Buffer.contents hex_buf); *)
+  Eio.traceln "Read: (%d): %s" (Cstruct.length buffer) (Buffer.contents hex_buf);
   ()
 
 let write_data flow data =
   let hex_buf = Buffer.create 100 in
   Cstruct.hexdump_to_buffer hex_buf data;
-  (* Eio.traceln "Write: (%d): %s" (Cstruct.length data) (Buffer.contents hex_buf); *)
+  Eio.traceln "Write: (%d): %s" (Cstruct.length data) (Buffer.contents hex_buf);
   let source = Eio.Flow.cstruct_source [data] in
   Eio.Flow.copy source flow;
   ()
@@ -109,7 +111,7 @@ let create_method_frame Protocol.Spec.{ message_id; spec; apply; _ } =
     let offset = Frame_header.write data 0 ~frame_type:Types.Frame_type.Method ~channel_no ~size:(Method_header.size + payload_size) in
     let offset = Method_header.write data offset ~class_id:message_id.class_id ~method_id:message_id.method_id in
     let offset = apply (writer data offset) t in
-    let (_: int) = Frame_end.write data offset () in
+    Frame_end.write data offset;
     data
 
 let create_method_frame_args def =
@@ -117,27 +119,63 @@ let create_method_frame_args def =
   fun ~channel_no ->
     def.make_named (create_method_frame ~channel_no)
 
-let create_content_frame: _ Protocol.Content.def -> _ = fun def ->
+(* Create body frame *)
+let create_body_frame ~channel_no ~offset ~length body =
+  let frame = Cstruct.create_unsafe (Frame_header.size + length + Frame_end.size) in
+  let frame_offset = Frame_header.write frame 0 ~frame_type:Types.Frame_type.Content_body ~channel_no ~size:length in
+  Cstruct.blit_from_string body offset frame frame_offset length;
+  Frame_end.write frame (frame_offset + length);
+  frame
+
+let create_content_frames: _ Protocol.Content.def -> max_frame_size:int -> channel_no:int -> weight:int -> 'content -> string -> Cstruct.t list = fun def ->
   let sizer = Protocol.Content.size def.spec in
   let writer = Protocol.Content.write def.spec 0 in
-  fun ~channel_no ~weight t ->
-    let body_size = def.apply sizer t in
-    let data = Cstruct.create_unsafe (Frame_header.size + Content_header.size + body_size + Frame_end.size) in
-    let content_header_offset = Frame_header.write data 0 ~frame_type:Types.Frame_type.Method ~channel_no ~size:(Content_header.size + body_size) in
-    (* Skip writing the content header, as we need to calculcate the flags first *)
-    let offset = content_header_offset + Content_header.size in
-    let property_flags = def.apply (writer data offset) t in
-    let (_: int) = Frame_end.write data (offset + body_size) () in
-    (* Write the content header *)
-    let (_: int) = Content_header.write data content_header_offset ~class_id:def.message_id.class_id ~weight ~body_size ~property_flags in
-    data
 
+  let rec create_body_frames ~max_frame_size ~channel_no body has_frame offset =
+    let length = String.length body in
+    match length - offset with
+    | 0 when has_frame -> []
+    | 0 -> create_body_frame ~channel_no ~offset:0 ~length body :: []
+    | n ->
+      let length = Int.min max_frame_size n in
+      create_body_frame ~offset ~channel_no ~length body :: create_body_frames ~max_frame_size ~channel_no body true (offset + length)
+  in
+
+  fun ~max_frame_size ~channel_no ~weight t body ->
+    let body_size = String.length body in
+    let content_size = def.apply sizer t in
+    let content = Cstruct.create_unsafe (Frame_header.size + content_size + Frame_end.size) in
+    let offset = Frame_header.write content 0 ~frame_type:Types.Frame_type.Content_header ~channel_no ~size:content_size in
+    let property_flags = def.apply (writer content offset) t in
+    Frame_end.write content (Cstruct.length content - 1);
+
+    let header = Cstruct.create_unsafe (Frame_header.size + Content_header.size + Frame_end.size) in
+    let offset = Frame_header.write header 0 ~frame_type:Types.Frame_type.Content_header ~channel_no ~size:Content_header.size in
+    let offset = Content_header.write header offset ~class_id:def.message_id.class_id ~weight ~body_size ~property_flags in
+    Frame_end.write header offset;
+
+    let body_frames = create_body_frames ~max_frame_size ~channel_no body false 0 in
+    header :: content :: body_frames
+
+
+(* Create at least one body frame, even if the content is 0 length. Dont really know if we want that.... *)
+let create_body_frames ~max_frame_size ~channel_no body =
+  let length = String.length body in
+  let rec loop has_frame offset =
+    match length - offset with
+    | 0 when has_frame -> []
+    | 0 -> create_body_frame ~channel_no ~offset:0 ~length body :: []
+    | n ->
+      let length = Int.min max_frame_size n in
+      create_body_frame ~offset ~channel_no ~length body :: loop true (offset + length)
+  in
+  loop false 0
 
 let heartbeat_frame =
   let size = Frame_header.size + 1 in
   let message = Cstruct.create size in
   let (_: int) = Frame_header.write message 0 ~frame_type:Types.Frame_type.Heartbeat ~channel_no:0 ~size:0 in
-  let (_: int) = Frame_end.write message (Frame_header.size) () in
+  Frame_end.write message (Frame_header.size);
   message
 
 let read_content receive_stream =

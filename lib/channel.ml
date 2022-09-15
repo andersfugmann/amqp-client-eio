@@ -28,7 +28,7 @@ type message_reply = { message_id: message_id;
                      }
 
 module Message = struct
-  type content = Spec.Basic.Content.t * Cstruct.t list
+  type content = Spec.Basic.Content.t * string
 
   type t =
     { delivery_tag : int;
@@ -75,6 +75,7 @@ type 'a with_confirms = 'a confirm -> 'a t
 
 
 let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
+  Eio.traceln "Channel: Publish called";
   match t.confirms_enabled with
   | true ->
     let p, u = Promise.create () in
@@ -82,6 +83,7 @@ let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
     Promise.await p
   | false ->
     Stream.send t.command_stream (Publish { data; ack=None });
+    Eio.traceln "Done";
     t.ok
 
 let rec handle_commands t =
@@ -144,9 +146,16 @@ let handle_return: _ t -> Spec.Basic.Return.t -> Spec.Basic.Content.t -> Cstruct
   failwith "Not implemented"
 
 let handle_deliver: _ t -> Spec.Basic.Deliver.t -> Spec.Basic.Content.t -> Cstruct.t list -> unit = fun t deliver content body ->
+  let data = Bytes.create (Cstruct.lenv body) in
+  let (_: int) =
+    List.fold_left ~init:0 ~f:(fun offset buf ->
+      let length = Cstruct.length buf in
+      Cstruct.blit_to_bytes buf 0 data offset length; offset + length
+    ) body
+  in
 
   match Hashtbl.find_opt t.consumers deliver.consumer_tag with
-  | Some stream -> Stream.send stream (deliver, (content, body))
+  | Some stream -> Stream.send stream (deliver, (content, Bytes.unsafe_to_string data))
   | None -> failwith "Could not find consumer for delivered message"
 
 let handle_confirm: type a. a confirms -> a t -> _ = fun confirm t ->

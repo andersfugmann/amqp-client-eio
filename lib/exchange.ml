@@ -75,18 +75,19 @@ let unbind: type a. _ Channel.t -> destination: _ t -> source: a t -> a -> unit 
   | Match -> fun (`Headers arguments) -> unbind ~arguments ()
 
 let create_publish = Framing.create_method_frame Spec.Basic.Publish.def
-let create_content = Framing.create_content_frame Spec.Basic.Content.def
+let create_content = Framing.create_content_frames Spec.Basic.Content.def
 
-let publish: type a. a Channel.t -> _ t -> ?mandatory:bool -> routing_key:string -> Message.content -> a =
-  fun channel t ?(mandatory=false) ~routing_key (content, body) ->
-    let publish =
-      create_publish ~channel_no:channel.channel_no
-        Spec.Basic.Publish.{ exchange = t.name;
-                             routing_key;
-                             mandatory;
-                             immediate = false;
-                           }
-    in
-    let content = create_content ~channel_no:channel.channel_no  ~weight:1 content in
-    let data = publish :: content :: body in
-    Channel.publish channel data
+let publish: type a. _ t -> a Channel.t -> ?mandatory:bool -> routing_key:string -> Message.content -> a =
+  fun t channel ?(mandatory=false) ~routing_key (content, body) ->
+  Eio.traceln "Publish called";
+  let publish =
+    create_publish ~channel_no:channel.channel_no
+      Spec.Basic.Publish.{ exchange = t.name;
+                           routing_key;
+                           mandatory;
+                           immediate = false;
+                         }
+  in
+  let content = create_content ~max_frame_size:channel.frame_max ~channel_no:channel.channel_no ~weight:1 content body in
+  let data = publish :: content in
+  Channel.publish channel data

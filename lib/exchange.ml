@@ -88,6 +88,6 @@ let publish: type a. _ t -> a Channel.t -> ?mandatory:bool -> routing_key:string
                            immediate = false;
                          }
   in
-  let content = create_content ~max_frame_size:channel.frame_max ~channel_no:channel.channel_no ~weight:1 content body in
+  let content = create_content ~max_frame_size:channel.frame_max ~channel_no:channel.channel_no content body in
   let data = publish :: content in
   Channel.publish channel data

@@ -52,7 +52,7 @@ module Content_header = struct
   let read = Protocol.Spec.(read spec make)
   let write =
     let writer = Protocol.Spec.write spec in
-    fun data off ~class_id ~weight ~body_size ~property_flags -> writer data off class_id weight body_size property_flags
+    fun data off ~class_id ~body_size ~property_flags -> writer data off class_id 0 body_size property_flags
 end
 
 type content = { header: Content_header.t; data: Cstruct.t; body: Cstruct.t list }
@@ -127,7 +127,7 @@ let create_body_frame ~channel_no ~offset ~length body =
   Frame_end.write frame (frame_offset + length);
   frame
 
-let create_content_frames: _ Protocol.Content.def -> max_frame_size:int -> channel_no:int -> weight:int -> 'content -> string -> Cstruct.t list = fun def ->
+let create_content_frames: _ Protocol.Content.def -> max_frame_size:int -> channel_no:int -> 'content -> string -> Cstruct.t list = fun def ->
   let sizer = Protocol.Content.size def.spec in
   let writer = Protocol.Content.write def.spec 0 in
 
@@ -141,22 +141,19 @@ let create_content_frames: _ Protocol.Content.def -> max_frame_size:int -> chann
       create_body_frame ~offset ~channel_no ~length body :: create_body_frames ~max_frame_size ~channel_no body true (offset + length)
   in
 
-  fun ~max_frame_size ~channel_no ~weight t body ->
+  fun ~max_frame_size ~channel_no t body ->
     let body_size = String.length body in
     let content_size = def.apply sizer t in
-    let content = Cstruct.create_unsafe (Frame_header.size + content_size + Frame_end.size) in
-    let offset = Frame_header.write content 0 ~frame_type:Types.Frame_type.Content_header ~channel_no ~size:content_size in
-    let property_flags = def.apply (writer content offset) t in
+    let content = Cstruct.create_unsafe (Frame_header.size + Content_header.size + content_size + Frame_end.size) in
+    let content_header_offset = Frame_header.write content 0 ~frame_type:Types.Frame_type.Content_header ~channel_no ~size:(Content_header.size + content_size) in
+    Eio.traceln "Create content for class: %d" def.message_id.class_id;
+
+    let property_flags = def.apply (writer content (content_header_offset + Content_header.size)) t in
+    let (_: int) = Content_header.write content content_header_offset ~class_id:def.message_id.class_id ~body_size ~property_flags in
     Frame_end.write content (Cstruct.length content - 1);
 
-    let header = Cstruct.create_unsafe (Frame_header.size + Content_header.size + Frame_end.size) in
-    let offset = Frame_header.write header 0 ~frame_type:Types.Frame_type.Content_header ~channel_no ~size:Content_header.size in
-    let offset = Content_header.write header offset ~class_id:def.message_id.class_id ~weight ~body_size ~property_flags in
-    Frame_end.write header offset;
-
     let body_frames = create_body_frames ~max_frame_size ~channel_no body false 0 in
-    header :: content :: body_frames
-
+    content :: body_frames
 
 (* Create at least one body frame, even if the content is 0 length. Dont really know if we want that.... *)
 let create_body_frames ~max_frame_size ~channel_no body =

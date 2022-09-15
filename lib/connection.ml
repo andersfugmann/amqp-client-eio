@@ -303,9 +303,9 @@ let send_heartbeat ~clock stream freq =
   | exn -> Eio.traceln "Heartbeat thread terminated with exn: %s\n%!" (Printexc.to_string exn);
     ()
 
-let handle_blocked _ = failwith "Not implemented"
-let handle_unblocked _ = failwith "Not implemented"
-let handle_close _ = failwith "Not implemented"
+let handle_blocked _ = failwith "Blocked Not implemented"
+let handle_unblocked _ = failwith "Unblocked Not implemented"
+let handle_close _ = failwith "Close Not implemented"
 
 (** Create a channel to amqp *)
 let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_size) ?(max_stream_length=5) ?(credentials=Credentials.default) ?(port=5672) host =

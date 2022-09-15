@@ -8,8 +8,7 @@ let test_amqp env =
     Eio.traceln "Channel created";
     let _queue = Queue.declare channel "test_queue" in
     Eio.traceln "Queue created";
-    let `Ok = Exchange.publish Exchange.default channel ~mandatory:true ~routing_key:"test_queue" (Message.make "1234567") in
-    let `Ok = Exchange.publish Exchange.default channel ~routing_key:"test_queue" (Message.make "abcdefghijkl") in
+    let () = Exchange.publish Exchange.default channel ~mandatory:true ~routing_key:"test_queue" (Message.make "1234567") in
     ()
   )
 

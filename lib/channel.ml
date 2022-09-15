@@ -4,16 +4,12 @@ module Queue = Stdlib.Queue
 open Types
 open Utils
 
-type _ confirms =
-  | No_confirm: [ `Ok ] confirms
-  | With_confirm: [ `Ok | `Rejected ] confirms
+type _ confirm =
+  | No_confirm: unit confirm
+  | With_confirm: [ `Ok | `Rejected ] confirm
 
 let no_confirm = No_confirm
 let with_confirm = With_confirm
-
-type 'a confirm = 'a confirms
-  constraint 'a = [> `Ok ]
-  constraint 'a = [< `Ok | `Rejected ]
 
 exception Closed of string
 
@@ -51,31 +47,23 @@ type 'a command =
   | Deregister_consumer of { consumer_tag: consumer_tag;  promise: unit Promise.u; }
   (** De-register  a consumer. *)
 
+(* TODO: Clean this up. Many of the fields do not need to be carried around. *)
 type 'a t = {
-  connection: Connection.t;
-  confirms_enabled: bool; (* This is useless I think *)
   channel_no: int;
+  service: Service.t;
+  frame_max: int;
+  ok: 'a;
+  confirms_enabled: bool; (* This is useless I think *)
   receive_stream: (Types.Frame_type.t * Cstruct.t) Stream.t; (** Receiving messages *)
   send_stream: Cstruct.t Stream.t; (** Message send stream *)
   command_stream: 'a command Stream.t; (** Communicate commands *)
-  frame_max: int;
-  service: Service.t;
-  ok: 'a;
-  mutable acks: (int * 'a Promise.u) Mlist.t;
   waiters: (message_reply list) Queue.t; (** Users waiting for Replies. This should be a map. *)
+  mutable acks: (int * 'a Promise.u) Mlist.t;
   consumers: (consumer_tag, deliver Stream.t) Hashtbl.t;
   mutable next_message_id: int;
-  mutable flow: (unit Promise.t * unit Promise.u);
-  mutable close_reason: exn option;
 }
 
-type 'a with_confirms = 'a confirm -> 'a t
-  constraint 'a = [> `Ok ]
-  constraint 'a = [< `Ok | `Rejected ]
-
-
 let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
-  Eio.traceln "Channel: Publish called";
   match t.confirms_enabled with
   | true ->
     let p, u = Promise.create () in
@@ -83,7 +71,6 @@ let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
     Promise.await p
   | false ->
     Stream.send t.command_stream (Publish { data; ack=None });
-    Eio.traceln "Done";
     t.ok
 
 let rec handle_commands t =
@@ -97,7 +84,7 @@ let rec handle_commands t =
       begin
         match t.confirms_enabled, ack with
         | false, None -> ()
-        | false, Some promise -> Eio.Promise.resolve_ok promise `Ok
+        | false, Some promise -> Eio.Promise.resolve_ok promise t.ok
         | true, None ->
           t.next_message_id <- t.next_message_id + 1;
           ()
@@ -120,18 +107,8 @@ let rec handle_commands t =
 
 exception Channel_closed of Spec.Channel.Close.t
 
-type 'a x = [< `Ok | `Rejected > `Ok ] as 'a
-
 (** Initiate graceful shutdown *)
 let shutdown t reason =
-  t.close_reason <- Some reason;
-
-  begin
-    match Promise.is_resolved (fst t.flow) with
-    | true -> ()
-    | false -> Promise.resolve_exn (snd t.flow) reason
-  end;
-
   Stream.close t.command_stream reason;
 
   (* Cancel all acks *)
@@ -158,7 +135,7 @@ let handle_deliver: _ t -> Spec.Basic.Deliver.t -> Spec.Basic.Content.t -> Cstru
   | Some stream -> Stream.send stream (deliver, (content, Bytes.unsafe_to_string data))
   | None -> failwith "Could not find consumer for delivered message"
 
-let handle_confirm: type a. a confirms -> a t -> _ = fun confirm t ->
+let handle_confirm: type a. a confirm -> a t -> _ = fun confirm t ->
   let confirm: a t -> delivery_tag:delivery_tag -> multiple:bool -> [ `Ok | `Rejected ] -> unit =
     match confirm with
     | No_confirm -> fun _t ~delivery_tag:_ ~multiple:_  _ -> ()
@@ -184,8 +161,8 @@ let handle_confirm: type a. a confirms -> a t -> _ = fun confirm t ->
 
 let handle_ack confirm_f ack = confirm_f (`Ack ack)
 let handle_nack confirm_f nack = confirm_f (`Nack nack)
-let handle_close _t _ = failwith "Not Implemented"
-let handle_flow _t _ = failwith "Not Implemented"
+let handle_close _t _ = failwith "Close Not Implemented"
+let handle_flow _t _ = failwith "Flow Not Implemented"
 
 
 let handle_message t data = function
@@ -199,11 +176,11 @@ let rec consume_messages t =
   handle_message t data frame_type;
   consume_messages t
 
-let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connection confirm_type ->
-  let has_confirm =
-    let get_confirm: type a. a confirms -> bool = function
-      | No_confirm -> false
-      | With_confirm -> true
+let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw connection confirm_type ->
+  let has_confirm, ok =
+    let get_confirm: type a. a confirm -> bool * a = function
+      | No_confirm -> false, ()
+      | With_confirm -> true, `Ok
     in
     get_confirm confirm_type
   in
@@ -215,23 +192,21 @@ let init: sw:Eio.Switch.t -> Connection.t -> 'a with_confirms = fun ~sw connecti
   let service = Service.init ~send_stream ~receive_stream ~channel_no () in
 
   let t = {
-    connection;
     confirms_enabled = has_confirm;
     channel_no;
     receive_stream;
     send_stream;
-    command_stream = Stream.create ~capacity:1 ();
+    command_stream = Stream.create ~capacity:5 ();
     frame_max;
     service;
-    ok = `Ok;
+    ok;
+
     (* When we close a stream, we try to post a message. This is problematic if the consumer trues to close => deadlock. *)
     (* So how do we close a stream? *)
     acks = Mlist.create ();
     waiters = Queue.create ();
     consumers = Hashtbl.create 7;
     next_message_id = 1;
-    flow = Promise.create ();
-    close_reason = None;
   }
   in
 

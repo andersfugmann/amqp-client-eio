@@ -55,13 +55,12 @@ end
 
 module Channel : sig
   type 'a t
-  type 'a confirms
-  val no_confirm : [ `Ok ] confirms
-  val with_confirm : [ `Ok | `Rejected ] confirms
+  type 'a confirm
+  val no_confirm : unit confirm
+  val with_confirm : [ `Ok | `Rejected ] confirm
   exception Closed of Types.string
   exception Channel_closed of Spec.Channel.Close.t
-  type 'a with_confirms = 'a confirms -> 'a t constraint 'a = [< `Ok | `Rejected > `Ok ]
-  val init : sw:Eio.Switch.t -> Connection.t -> [< `Ok | `Rejected > `Ok ] with_confirms
+  val init : sw:Eio.Switch.t -> Connection.t -> 'a confirm -> 'a t
 end
 
 module Message : sig

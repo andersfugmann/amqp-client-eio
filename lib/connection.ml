@@ -46,6 +46,7 @@ module Queue = Stdlib.Queue
 open Utils
 
 exception Closed of string
+let closed_by_user = Closed "Connection closed on user request"
 
 let version = "0.0.1"
 let max_frame_size = 131072
@@ -68,7 +69,7 @@ type flow = blocked:bool -> unit
 
 type command = Register_channel of { receive_stream: channel_stream; flow: flow; promise: channel_info Promise.u }
              | Deregister_channel of { channel_no: int; promise: unit Promise.u }
-             | Close
+             | Close of string
 
 type t = {
   command_stream: command Stream.t;
@@ -92,15 +93,14 @@ let handle_deregister_channel channels channel_no promise =
   channels.(channel_no) <- None;
   Promise.resolve_ok promise ()
 
-let shutdown ~blocked ~send_stream ~channels reason =
-  (* Should we close the socket now... Yes! *)
-  Promise.resolve_exn blocked reason;
-  Stream.close send_stream reason;
-  Array.iter ~f:(function Some channel -> Stream.close channel reason | None -> ()) channels;
+let shutdown ~send_stream ~channels ~command_stream exn =
+  Stream.close send_stream exn;
+  Stream.close command_stream exn;
+  Array.iter ~f:(function Some (channel, flow) -> flow ~blocked:false; Stream.close channel exn | None -> ()) channels;
   ()
 
 (** Command handler. User commands (and channel commands) are serialized though this. *)
-let command_handler ~command_stream ~service ~send_stream ~channels ~max_channels ~frame_max =
+let command_handler ~set_close_reason ~command_stream ~service ~send_stream ~channels ~max_channels ~frame_max =
   ignore service; (* We should use the service to handle incoming requests (e.g. close and block), and to send commands to the server *)
   let rec loop next_channel =
     let next_channel = match Stream.receive command_stream with
@@ -110,14 +110,15 @@ let command_handler ~command_stream ~service ~send_stream ~channels ~max_channel
       | Deregister_channel { channel_no; promise } ->
         handle_deregister_channel channels channel_no promise;
         next_channel
-      | _ -> failwith "unsupported command"
+      | Close reason ->
+        (* Send close *)
+        let exn = set_close_reason closed_by_user in
+        let () = Spec.Connection.Close.client_request service ~reply_code:0 ~reply_text:reason ~class_id:0 ~method_id:0 () in
+        raise exn
     in
     loop next_channel
   in
-  try
-    loop 1
-  with
-  | Closed _ -> ()
+  loop 1
 
 let send_command t command =
   Stream.send t.command_stream command
@@ -138,15 +139,33 @@ let deregister_channel t ~channel_no =
   send_command t command;
   Promise.await pt
 
-let handle_start_message ~id ~credentials Spec.Connection.Start.{ version_major; version_minor; server_properties; mechanisms; locales } =
-  let print_map map =
-    List.iter ~f:(fun (k, v) -> printf " %s = " k; Types.print_type " " v; printf "\n";) map
+let close t reason =
+  let command = Close reason in
+  send_command t command
+
+
+let handle_start_message ~id ~credentials Spec.Connection.Start.{ version_major; version_minor; server_properties; mechanisms=_ ; locales } =
+(*
+   let print_map map =
+   List.iter ~f:(fun (k, v) -> printf " %s = " k; Types.print_type " " v; printf "\n";) map
   in
   printf "Version: %d.%d\n" version_major version_minor;
   printf "Server properties:\n";
   print_map server_properties;
   printf "Mechanisms: %s\n" mechanisms;
   printf "Locales: %s\n" locales;
+*)
+  let server_product =
+    List.assoc_opt "product" server_properties
+    |> fun v -> Option.bind v (function Types.VLongstr s -> Some s | _ -> None)
+    |> Option.value ~default:"<unknown>"
+  in
+  let server_version =
+    List.assoc_opt "version" server_properties
+    |> fun v -> Option.bind v (function Types.VLongstr s -> Some s | _ -> None)
+    |> Option.value ~default:"<unknown>"
+  in
+  Eio.traceln ~__POS__ "Established connection to %s %s using AMQP %d.%d" server_product server_version version_major version_minor;
 
   (* Produce a reply *)
   let mechanism = credentials.Credentials.mechanism in
@@ -209,36 +228,11 @@ let handle_connection_messages service receive_stream _command_stream =
         Service.handle_method service data
     in
     loop ()
-  (*
-      begin
-        let message_id, data = Framing.decode_method_header data in
-        match message_id with
-        | message_id when Types.Message_id.equal message_id Spec.Connection.Blocked.message_id ->
-          () (* Should send a command to block the send stream *)
-        | message_id when Types.Message_id.equal message_id Spec.Connection.Unblocked.message_id ->
-          ()
-        | message_id when Types.Message_id.equal message_id close_id ->
-          let close_connection message =
-            let reason =
-              match message with
-              | Spec.Connection.Close.{ reply_code; reply_text; class_id = 0; method_id = 0 } ->
-                Printf.sprintf "%d: %s" reply_code reply_text
-              | { reply_code; reply_text; class_id; method_id } ->
-                Printf.sprintf "%d: Server terminated connection due to protocol failure. Text: %s. Offending message id: (%d, %d)" reply_code reply_text class_id method_id;
-            in
-            Stream.close command_stream (Closed reason);
-          in
-          close_f ~stream:send_stream ~channel_no:0 data (fun mk close_reason -> close_connection close_reason; mk);
-     ()
-    | _ -> failwith "Unknown message on channel 0"
-     end;
-     loop ()
-  *)
   in
   try
     loop ()
   with exn ->
-    Eio.traceln "Handle connection messages terminated with exn: %s" (Printexc.to_string exn);
+    Eio.traceln ~__POS__ "Handle connection messages terminated with exn: %s" (Printexc.to_string exn);
     raise exn
 
 (** Receive messages.
@@ -260,12 +254,18 @@ let receive_messages ~set_close_reason flow channels =
   try
     loop ()
   with
-  | End_of_file ->
-    let exn = set_close_reason (Closed "Connection terminated") in
+  | End_of_file
+  | Eio.Net.Connection_reset _ ->
+    let exn = set_close_reason (Closed "Connection lost") in
+    Eio.traceln ~__POS__ "Connection lost: %s" (Printexc.to_string exn);
     Stream.close (Option.get channels.(0) |> fst) exn
   | Closed _ as exn ->
     Eio.Flow.shutdown flow `Receive;
-    failwith_f "Channel closed with reason: %s" (Printexc.to_string exn)
+    raise exn
+  | exn ->
+    Eio.traceln ~__POS__ "Received exception: %s" (Printexc.to_string exn);
+    raise exn
+
 
 let send_messages ~set_close_reason flow send_stream =
   Framing.write_protocol_header flow;
@@ -278,12 +278,17 @@ let send_messages ~set_close_reason flow send_stream =
   try
     loop ()
   with
-  | End_of_file ->
-    let exn = set_close_reason (Closed "Network connection terminated") in
+  | End_of_file
+  | Eio.Net.Connection_reset _ ->
+    let exn = set_close_reason (Closed "Connection lost") in
+    Eio.traceln ~__POS__ "Connection closed: %s" (Printexc.to_string exn);
     Stream.close send_stream exn
   | Closed _ as exn ->
-    Eio.traceln "Send stream closed with exn: %s\n%!" (Printexc.to_string exn);
+    Eio.traceln ~__POS__ "Send stream closed with exn: %s" (Printexc.to_string exn);
     Eio.Flow.shutdown flow `Send
+  | exn ->
+    Eio.traceln ~__POS__ "Recevied exception: %s" (Printexc.to_string exn);
+    raise exn
 
 (** Continuously send a heartbeat frame every [freq] / 2 *)
 let send_heartbeat ~clock stream freq =
@@ -302,72 +307,51 @@ let send_heartbeat ~clock stream freq =
   try
     loop ()
   with
-  | exn -> Eio.traceln "Heartbeat thread terminated with exn: %s\n%!" (Printexc.to_string exn);
+  | exn -> Eio.traceln ~__POS__ "Heartbeat thread terminated with exn: %s" (Printexc.to_string exn);
     ()
 
-module Blocked = struct
-  type t = { mutable blocked: bool; mutex: Eio.Mutex.t; condition: Eio.Condition.t }
-
-  let init () = { blocked = false; mutex = Eio.Mutex.create (); condition = Eio.Condition.create () }
-  let block t = t.blocked <- true
-  let unblock t =
-    Eio.Mutex.lock t.mutex;
-    t.blocked <- false;
-    Eio.Condition.broadcast t.condition;
-    Eio.Mutex.unlock t.mutex
-
-  let rec wait_unblocked t =
-    match t.blocked with
-    | false -> ()
-    | true ->
-      Eio.Mutex.lock t.mutex;
-      match t.blocked with
-      | false ->
-        Eio.Mutex.unlock t.mutex
-      | true ->
-        Eio.Condition.await t.condition t.mutex;
-        Eio.Mutex.unlock t.mutex;
-        wait_unblocked t
-end
-
-
-
-
 let handle_blocked channels Spec.Connection.Blocked.{ reason } =
-  Eio.traceln "Connection blocked: %s" reason;
+  Eio.traceln ~__POS__ "Connection blocked: %s" reason;
   Array.iter ~f:(function Some (_, flow) -> flow ~blocked:true | None -> ()) channels
 
 let handle_unblocked channels () =
+  Eio.traceln ~__POS__ "Connection unblocked";
   Array.iter ~f:(function Some (_, flow) -> flow ~blocked:false | None -> ()) channels
 
-let handle_close set_close_reason Spec.Connection.Close.{ reply_code; reply_text; class_id; method_id } =
+let handle_close ~send_stream ~command_stream set_close_reason Spec.Connection.Close.{ reply_code; reply_text; class_id; method_id } =
   let reason = Printf.sprintf "Connection closed by server. %d: %s. (%d, %d)" reply_code reply_text class_id method_id in
-  let _ = set_close_reason (Closed reason) in
-  Eio.traceln "%s" reason
+  let exn = set_close_reason (Closed reason) in
+  (* Send reply and close the send stream *)
+  let close_ok = Framing.create_method_frame Spec.Connection.Close_ok.def ~channel_no:0 () in
+  Stream.close send_stream ~message:close_ok exn;
+  Stream.close command_stream exn;
+  Eio.traceln ~__POS__ "%s" (Printexc.to_string exn)
 
 let set_close_reason, get_close_reason =
   let close_reason = ref None in
-  (fun exn -> match !close_reason with Some exn -> exn | None -> close_reason := (Some exn); exn),
+  (fun exn -> match !close_reason with Some exn -> exn | None -> (close_reason := (Some exn); exn)),
   (fun () -> !close_reason)
 
 (** Create a channel to amqp *)
 let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_size) ?(max_stream_length=5) ?(credentials=Credentials.default) ?(port=5672) host =
   let command_stream = Stream.create ~capacity:1 () in
+
+  (* Create the streams *)
+  let send_stream = Stream.create ~capacity:max_stream_length () in
+
+  (* We just create max_channels. If the peer allows less, we waste a little memory *)
+  let channels = Array.make max_channels None in
+
+
   Eio.Fiber.fork_sub
     ~sw
-    ~on_error:(fun exn -> Eio.traceln "Connection closed: %s\n%!" (Printexc.to_string exn))
+    ~on_error:(fun exn -> shutdown ~send_stream ~channels ~command_stream exn)
     (fun sw ->
        let clock = Eio.Stdenv.clock env in
 
        let addr = Eio_unix.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
        let net : #Eio.Net.t = Eio.Stdenv.net env in
        let flow = Eio.Net.connect ~sw net (`Tcp (addr, port)) in
-
-       (* Create the streams *)
-       let send_stream = Stream.create ~capacity:max_stream_length () in
-
-       (* We just create max_channels. If the peer allows less, we waste a little memory *)
-       let channels = Array.make max_channels None in
 
        (* Register channel 0 to handle messages *)
        let channel0_stream = Stream.create () in
@@ -379,8 +363,9 @@ let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_
        let service = Service.init ~send_stream ~receive_stream:channel0_stream ~channel_no:0 () in
        Spec.Connection.Blocked.server_request service (handle_blocked channels);
        Spec.Connection.Unblocked.server_request service (handle_unblocked channels);
-       (* We want to close the send stream after sending the message (i.e. last message sent) *)
-       Spec.Connection.Close.server_request service (handle_close set_close_reason);
+
+       (* We want to close the send stream after sending the message, so we cannot use the usual oneshot version *)
+       Service.server_request Spec.Connection.Close.def service (handle_close ~command_stream ~send_stream set_close_reason);
 
        Eio.Fiber.fork ~sw (fun () -> handle_connection_messages service channel0_stream command_stream);
 
@@ -401,7 +386,7 @@ let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_
 
        Eio.Fiber.fork ~sw
          (fun () -> try
-             command_handler ~command_stream ~send_stream ~service ~channels ~max_channels:channel_max ~frame_max
+             command_handler ~set_close_reason ~command_stream ~send_stream ~service ~channels ~max_channels:channel_max ~frame_max
            with exn -> Eio.traceln "Command handler closed: %s: %s" (Printexc.to_string exn) (Printexc.get_backtrace ()); raise exn);
 
        ()

@@ -222,7 +222,7 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
 
   Eio.Fiber.fork_sub
     ~sw
-    ~on_error:(fun exn -> Printf.printf "Channel exited: %s\n%!" (Printexc.to_string exn); shutdown t exn)
+    ~on_error:(fun exn -> Eio.traceln ~__POS__ "Channel exited: %s" (Printexc.to_string exn); shutdown t exn)
     (fun sw ->
 
        let handle_confirm = handle_confirm confirm_type t in

@@ -4,9 +4,6 @@
     This module is not thread safe
 *)
 
-(* We need to make this module threadsafe wrt. simple calls - not registrations *)
-
-
 open! StdLabels
 module Queue = Stdlib.Queue
 open Utils

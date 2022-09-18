@@ -50,6 +50,7 @@ module Connection : sig
     ?max_frame_size:int ->
     ?max_stream_length:int ->
     ?credentials:Credentials.t -> ?port:int -> string -> t
+  val close: t -> string -> unit
 end
 
 module Channel : sig

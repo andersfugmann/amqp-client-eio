@@ -33,7 +33,7 @@ let handle_method t data =
   | Some handler ->
     handler data
   | None ->
-    with_lock t.client_lock @@ fun () ->
+    Mutex.with_lock t.client_lock @@ fun () ->
     let handler = Queue.pop t.expect in
     handler (Ok (message_id, data))
 
@@ -139,7 +139,7 @@ let client_request_response:
   let send_request = match ress with
     | [] -> fun t _p request -> Stream.send t.send_stream request
     | _ ->  fun t p request ->
-      with_lock t.client_lock @@ fun () ->
+      Mutex.with_lock t.client_lock @@ fun () ->
       Queue.push (expect t p) t.expect;
       Stream.send t.send_stream request
   in

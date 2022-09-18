@@ -61,16 +61,22 @@ type 'a t = {
   mutable acks: (int * 'a Promise.u) Mlist.t;
   consumers: (consumer_tag, deliver Stream.t) Hashtbl.t;
   mutable next_message_id: int;
+  flow: Binary_semaphore.t;
 }
 
 let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
+  let send t message =
+    Binary_semaphore.wait t.flow true;
+    Stream.send t.command_stream message
+  in
+
   match t.confirms_enabled with
   | true ->
     let p, u = Promise.create () in
-    Stream.send t.command_stream (Publish { data; ack=Some u });
+    send t (Publish { data; ack=Some u });
     Promise.await p
   | false ->
-    Stream.send t.command_stream (Publish { data; ack=None });
+    send t (Publish { data; ack=None });
     t.ok
 
 let rec handle_commands t =
@@ -185,9 +191,12 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
     get_confirm confirm_type
   in
 
+  let flow = Binary_semaphore.create true in (* Allow flow *)
   let receive_stream = Stream.create () in
+
   (* Request channel number and register the receiving stream for same *)
-  let Connection.{ channel_no; send_stream; frame_max } = Connection.register_channel connection receive_stream in
+  (* TODO: Implemente flow handling *)
+  let Connection.{ channel_no; send_stream; frame_max } = Connection.register_channel connection ~flow:(fun ~blocked -> Binary_semaphore.set flow (not blocked)) ~receive_stream in
 
   let service = Service.init ~send_stream ~receive_stream ~channel_no () in
 
@@ -207,6 +216,7 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
     waiters = Queue.create ();
     consumers = Hashtbl.create 7;
     next_message_id = 1;
+    flow;
   }
   in
 

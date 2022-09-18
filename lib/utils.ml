@@ -1,31 +1,20 @@
 open !StdLabels
 module Queue = Stdlib.Queue
+open Eio
 
 let failwith_f fmt = Printf.ksprintf (fun s -> failwith s) fmt
 let log fmt = Eio.traceln fmt
 
 module Promise = struct
-  type 'a t = ('a, exn) result Eio.Promise.t
-  type 'a u = ('a, exn) result Eio.Promise.u
+  type 'a t = ('a, exn) result Promise.t
+  type 'a u = ('a, exn) result Promise.u
 
-  let create = Eio.Promise.create
-  let await = Eio.Promise.await_exn
-  let resolve_ok = Eio.Promise.resolve_ok
-  let resolve_exn = Eio.Promise.resolve_error
-  let is_resolved = Eio.Promise.is_resolved
+  let create = Promise.create
+  let await = Promise.await_exn
+  let resolve_ok = Promise.resolve_ok
+  let resolve_exn = Promise.resolve_error
+  let is_resolved = Promise.is_resolved
 end
-
-module Mutex = Mutex
-
-let with_lock l f =
-  Mutex.lock l;
-  try
-    let res = f () in
-    Mutex.unlock l;
-    res
-  with e ->
-    Mutex.unlock l;
-    raise e
 
 (** Extension to Eio.Stream, which allows closing the stream.
     A closed stream might still hold messages. Once the last message is taken off
@@ -43,6 +32,7 @@ let with_lock l f =
     We only want one message to be posted.
 *)
 module Stream = struct
+  open Stdlib
   open Eio.Private
   type 'a item = ('a, exn) result
   type 'a t = {
@@ -56,6 +46,18 @@ module Stream = struct
     mutable flow : bool; (** If false, receiver will be blocked receiving from the queue *)
     mutable closed : exn option;
   }
+
+  let with_lock l f =
+    Mutex.lock l;
+    try
+      let res = f () in
+      Mutex.unlock l;
+      res
+    with e ->
+      Mutex.unlock l;
+      raise e
+
+
 
   let create ?(capacity = Int.max_int) () =
     assert (capacity >= 0);
@@ -203,4 +205,46 @@ module Stream = struct
   let is_closed t  =
     with_lock t.mutex @@ fun () -> Option.is_some t.closed
 
+end
+
+module Mutex = struct
+  include Mutex
+  let with_lock l f =
+    Mutex.lock l;
+    try
+      let res = f () in
+      Mutex.unlock l;
+      res
+    with e ->
+      Mutex.unlock l;
+      raise e
+end
+
+module Binary_semaphore = struct
+  type t = { condition: Condition.t; mutable value: bool; mutex: Mutex.t }
+
+  let create value =
+    { condition = Condition.create ();
+      mutex = Mutex.create ();
+      value;
+    }
+
+  let set t v =
+    Mutex.with_lock t.mutex @@ fun () ->
+    match t.value = v with
+    | true -> ()
+    | false ->
+      t.value <- v;
+      Condition.broadcast t.condition;
+      ()
+
+  let wait t v =
+    let rec inner () =
+      match t.value = v with
+      | true -> ()
+      | false ->
+        Condition.await t.condition t.mutex;
+        inner ()
+    in
+    Mutex.with_lock t.mutex @@ fun () -> inner ()
 end

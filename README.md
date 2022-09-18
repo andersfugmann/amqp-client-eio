@@ -2,7 +2,10 @@
 AMQP client based on EIO, to allow taking advantage of effect based
 ocaml.
 
-[![Main workflow](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml/badge.svg)](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml)
+[![Main
+workflow](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml/badge.svg)](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml)
+
+[API](https://andersfugmann.github.io/amqp-client-eio/index.html)
 ## Design
 
 ### Goals
@@ -13,10 +16,6 @@ Data will be communicated over streams / channels or promises.
 #### Data processing should be done as close to user a possible
 When sending data, data processing (frame encapsulation) should be
 done by the calling thread.
-
-
-
-
 
 ### Connection
 Establish and setup a connection to the amqp server. This just holds

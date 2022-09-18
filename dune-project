@@ -12,7 +12,7 @@
 
 (license BSD-3-Clause)
 
-(documentation https://url/to/documentation)
+(documentation https://andersfugmann.github.io/amqp-client-eio/index.html)
 
 (package
  (name amqp_client_eio)

@@ -1,7 +1,7 @@
 (library
  (name amqp_client_eio)
  (public_name amqp_client_eio)
- (libraries  eio_main ocplib-endian.bigstring)
+ (libraries  eio_main)
  (synopsis "Amqp client library based on eio"))
 
 

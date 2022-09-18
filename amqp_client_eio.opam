@@ -4,14 +4,18 @@ synopsis: "AMQP client based on eio (Multicore / effects"
 description: "AMQP client based on eio (Multicore / effects"
 maintainer: ["Anders Fugmann"]
 authors: ["Anders Fugmann"]
-license: "LICENSE"
-tags: ["topics" "AMQP eio multicore" "your" "project"]
-homepage: "https://github.com/username/reponame"
+license: "BSD-3-Clause"
+tags: ["topics" "AMQP eio multicore library ocaml"]
+homepage: "https://github.com/andersfugmann/amqp-client-eio"
 doc: "https://url/to/documentation"
-bug-reports: "https://github.com/username/reponame/issues"
+bug-reports: "https://github.com/andersfugmann/amqp-client-eio/issues"
 depends: [
-  "ocaml"
   "dune" {>= "3.4"}
+  "ocaml" { >= "5.0.0"}
+  "eio"
+  "eio_main"
+  "eio_linux"
+  "ezxmlm"
   "odoc" {with-doc}
 ]
 build: [
@@ -28,4 +32,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/username/reponame.git"
+dev-repo: "git+https://github.com/andersfugmann/amqp-client-eio.git"

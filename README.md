@@ -2,6 +2,7 @@
 AMQP client based on EIO, to allow taking advantage of effect based
 ocaml.
 
+[![Main workflow](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml/badge.svg)](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml)
 ## Design
 
 ### Goals

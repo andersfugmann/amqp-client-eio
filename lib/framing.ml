@@ -2,6 +2,8 @@
 open StdLabels
 open Utils
 
+let trace = false
+
 let protocol_header = "AMQP\x00\x00\x09\x01"
 
 module Frame_header = struct
@@ -61,21 +63,24 @@ let read_data source buffer =
   Eio.Flow.read_exact source buffer;
   let hex_buf = Buffer.create 100 in
   Cstruct.hexdump_to_buffer hex_buf buffer;
-  Eio.traceln "Read: (%d): %s" (Cstruct.length buffer) (Buffer.contents hex_buf);
+  if trace then Eio.traceln "Read: (%d): %s" (Cstruct.length buffer) (Buffer.contents hex_buf);
   ()
 
 let write_data flow data =
   let hex_buf = Buffer.create 100 in
   Cstruct.hexdump_to_buffer hex_buf data;
-  Eio.traceln "Write: (%d): %s" (Cstruct.length data) (Buffer.contents hex_buf);
+  if trace then Eio.traceln "Write: (%d): %s" (Cstruct.length data) (Buffer.contents hex_buf);
   let source = Eio.Flow.cstruct_source [data] in
   Eio.Flow.copy source flow;
   ()
 
 let write_protocol_header flow =
-  Printf.printf "Write: (%d)\n%!" (String.length protocol_header);
-  String.iter ~f:(fun c -> Printf.printf "%02x " (Char.code c)) protocol_header;
-  Printf.printf "\n%!";
+  if (trace) then begin
+    Eio.traceln "Write: (%d)" (String.length protocol_header);
+    String.fold_right protocol_header ~f:(fun c acc -> Printf.sprintf "%02x" (Char.code c) :: acc) ~init:[]
+    |> String.concat ~sep:" "
+    |> Eio.traceln "%s"
+  end;
   Eio.Flow.copy_string protocol_header flow
 
 (* When receiving the body, we could hold partially received data. This allows us to do zero copy.
@@ -146,7 +151,6 @@ let create_content_frames: _ Protocol.Content.def -> max_frame_size:int -> chann
     let content_size = def.apply sizer t in
     let content = Cstruct.create_unsafe (Frame_header.size + Content_header.size + content_size + Frame_end.size) in
     let content_header_offset = Frame_header.write content 0 ~frame_type:Types.Frame_type.Content_header ~channel_no ~size:(Content_header.size + content_size) in
-    Eio.traceln "Create content for class: %d" def.message_id.class_id;
 
     let property_flags = def.apply (writer content (content_header_offset + Content_header.size)) t in
     let (_: int) = Content_header.write content content_header_offset ~class_id:def.message_id.class_id ~body_size ~property_flags in

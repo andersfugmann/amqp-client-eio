@@ -39,7 +39,6 @@ end
 
 module Connection : sig
   exception Closed of string
-  exception Break_loop
   module Credentials = Connection.Credentials
   type t
   val init :

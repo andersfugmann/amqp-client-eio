@@ -19,6 +19,7 @@
    3b. The send channel is closed (with 'Closed by server')
    3. Channel0 handler closes the receive channel
    4. The channel0 notifies all waiters and raises 'Closed by server'
+   Q: Where do we log the reason?
 
    Tcp error on the receive stream:
    1. The receive thread receives error and closes the receive stream
@@ -40,8 +41,6 @@ module Queue = Stdlib.Queue
 open Utils
 
 exception Closed of string
-exception Break_loop
-
 
 let version = "0.0.1"
 let max_frame_size = 131072
@@ -136,7 +135,7 @@ let deregister_channel t ~channel_no =
   send_command t command;
   Promise.await pt
 
-let handle_start_message ~id ~credentials ~version_major ~version_minor ~server_properties ~mechanisms ~locales () =
+let handle_start_message ~id ~credentials Spec.Connection.Start.{ version_major; version_minor; server_properties; mechanisms; locales } =
   let print_map map =
     List.iter ~f:(fun (k, v) -> printf " %s = " k; Types.print_type " " v; printf "\n";) map
   in
@@ -181,7 +180,7 @@ let handle_start_message ~id ~credentials ~version_major ~version_minor ~server_
   }
 
 
-let handle_tune_message ?heartbeat ~max_frame_size ~channel_max ~frame_max ~heartbeat:tune_heartbeat () =
+let handle_tune_message ?heartbeat ~max_frame_size Spec.Connection.Tune.{ channel_max; frame_max; heartbeat = tune_heartbeat } =
   let channel_max = Int.max max_channels channel_max in
   let frame_max = Int.max max_frame_size frame_max in
   let heartbeat = match heartbeat with
@@ -243,7 +242,7 @@ let handle_connection_messages service receive_stream _command_stream =
     If a TCP error is encountered the channel0 stream is closed and the function exits
     If the receive stream is closed, the receive flow is closed and the function exits
 *)
-let receive_messages flow channels =
+let receive_messages ~set_close_reason flow channels =
   let rec loop () =
     let (frame_header, data) = Framing.read_frame flow in
     let () =
@@ -259,13 +258,13 @@ let receive_messages flow channels =
     loop ()
   with
   | End_of_file ->
-    let exn = Closed "Connection terminated" in
+    let exn = set_close_reason (Closed "Connection terminated") in
     Stream.close (Option.get channels.(0)) exn
   | Closed _ as exn ->
     Eio.Flow.shutdown flow `Receive;
     failwith_f "Channel closed with reason: %s" (Printexc.to_string exn)
 
-let send_messages flow send_stream =
+let send_messages ~set_close_reason flow send_stream =
   Framing.write_protocol_header flow;
   (* We should handle exceptions here! *)
   let rec loop () =
@@ -277,7 +276,7 @@ let send_messages flow send_stream =
     loop ()
   with
   | End_of_file ->
-    let exn = Closed "Network connection terminated" in
+    let exn = set_close_reason (Closed "Network connection terminated") in
     Stream.close send_stream exn
   | Closed _ as exn ->
     Eio.traceln "Send stream closed with exn: %s\n%!" (Printexc.to_string exn);
@@ -303,13 +302,48 @@ let send_heartbeat ~clock stream freq =
   | exn -> Eio.traceln "Heartbeat thread terminated with exn: %s\n%!" (Printexc.to_string exn);
     ()
 
+module Blocked = struct
+  type t = { mutable blocked: bool; mutex: Eio.Mutex.t; condition: Eio.Condition.t }
+
+  let init () = { blocked = false; mutex = Eio.Mutex.create (); condition = Eio.Condition.create () }
+  let block t = t.blocked <- true
+  let unblock t =
+    Eio.Mutex.lock t.mutex;
+    t.blocked <- false;
+    Eio.Condition.broadcast t.condition;
+    Eio.Mutex.unlock t.mutex
+
+  let rec wait_unblocked t =
+    match t.blocked with
+    | false -> ()
+    | true ->
+      Eio.Mutex.lock t.mutex;
+      match t.blocked with
+      | false ->
+        Eio.Mutex.unlock t.mutex
+      | true ->
+        Eio.Condition.await t.condition t.mutex;
+        Eio.Mutex.unlock t.mutex;
+        wait_unblocked t
+end
+
+
+
+
 let handle_blocked _ = failwith "Blocked Not implemented"
 let handle_unblocked _ = failwith "Unblocked Not implemented"
-let handle_close _ = failwith "Close Not implemented"
+let handle_close set_close_reason Spec.Connection.Close.{ reply_code; reply_text; class_id; method_id } =
+  let reason = Printf.sprintf "Connection closed by server. %d: %s. (%d, %d)" reply_code reply_text class_id method_id in
+  let _ = set_close_reason (Closed reason) in
+  Eio.traceln "%s" reason
+
+let set_close_reason, get_close_reason =
+  let close_reason = ref None in
+  (fun exn -> match !close_reason with Some exn -> exn | None -> close_reason := (Some exn); exn),
+  (fun () -> !close_reason)
 
 (** Create a channel to amqp *)
 let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_size) ?(max_stream_length=5) ?(credentials=Credentials.default) ?(port=5672) host =
-  (* We need to put everything within a switch. We obtain t though a promise.*)
   let command_stream = Stream.create ~capacity:1 () in
   Eio.Fiber.fork_sub
     ~sw
@@ -330,27 +364,26 @@ let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_
        (* Register channel 0 to handle messages *)
        let channel0_stream = Stream.create () in
        channels.(0) <- Some channel0_stream;
-       Eio.Fiber.fork ~sw (fun () -> send_messages flow send_stream);
-       Eio.Fiber.fork ~sw (fun () -> receive_messages flow channels);
+
+       Eio.Fiber.fork ~sw (fun () -> send_messages ~set_close_reason flow send_stream);
+       Eio.Fiber.fork ~sw (fun () -> receive_messages ~set_close_reason flow channels);
 
        let service = Service.init ~send_stream ~receive_stream:channel0_stream ~channel_no:0 () in
        Spec.Connection.Blocked.server_request service handle_blocked;
        Spec.Connection.Unblocked.server_request service handle_unblocked;
-       Spec.Connection.Close.server_request service handle_close;
+       (* We want to close the send stream after sending the message (i.e. last message sent) *)
+       Spec.Connection.Close.server_request service (handle_close set_close_reason);
 
        Eio.Fiber.fork ~sw (fun () -> handle_connection_messages service channel0_stream command_stream);
 
-
        (* Now register the functions to handle messages *)
        let (_req, _res) =
-         Spec.Connection.Start.server_request_oneshot service
-         (Spec.Connection.Start.def.apply_named (handle_start_message ~id ~credentials))
+         Spec.Connection.Start.server_request_oneshot service (handle_start_message ~id ~credentials)
        in
        Eio.traceln "Start Done";
 
        let (_, Spec.Connection.Tune_ok.{ channel_max; frame_max; heartbeat }) =
-         Spec.Connection.Tune.server_request_oneshot service
-           (Spec.Connection.Tune.def.apply_named (handle_tune_message ?heartbeat ~max_frame_size))
+         Spec.Connection.Tune.server_request_oneshot service (handle_tune_message ?heartbeat ~max_frame_size)
        in
        Eio.traceln "Tune Done";
        Spec.Connection.Open.client_request service ~virtual_host ();

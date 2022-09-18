@@ -2,7 +2,7 @@ open !StdLabels
 module Queue = Stdlib.Queue
 
 let failwith_f fmt = Printf.ksprintf (fun s -> failwith s) fmt
-let log fmt = Printf.printf (fmt ^^ "\n%!")
+let log fmt = Eio.traceln fmt
 
 module Promise = struct
   type 'a t = ('a, exn) result Eio.Promise.t
@@ -14,6 +14,18 @@ module Promise = struct
   let resolve_exn = Eio.Promise.resolve_error
   let is_resolved = Eio.Promise.is_resolved
 end
+
+module Mutex = Mutex
+
+let with_lock l f =
+  Mutex.lock l;
+  try
+    let res = f () in
+    Mutex.unlock l;
+    res
+  with e ->
+    Mutex.unlock l;
+    raise e
 
 (** Extension to Eio.Stream, which allows closing the stream.
     A closed stream might still hold messages. Once the last message is taken off
@@ -40,14 +52,10 @@ module Stream = struct
     readers : 'a item Waiters.t;
     writers : (unit, exn) result Waiters.t;
     items : 'a Queue.t;
+    condition: Condition.t;
+    mutable flow : bool; (** If false, receiver will be blocked receiving from the queue *)
     mutable closed : exn option;
   }
-
-  let with_mutex t f =
-    Mutex.lock t.mutex;
-    match f () with
-    | x -> Mutex.unlock t.mutex; x
-    | exception ex -> Mutex.unlock t.mutex; raise ex
 
   let create ?(capacity = Int.max_int) () =
     assert (capacity >= 0);
@@ -60,17 +68,24 @@ module Stream = struct
       items = Queue.create ();
       readers = Waiters.create ();
       writers = Waiters.create ();
+      condition = Condition.create ();
+      flow = true;
       closed = None;
     }
 
   (** Push a message onto the stream.
-      @raise Closed if the stream has been closed *)
-  let send t item =
+      @raise Closed if the stream has been closed
+      @param force if true, ignore max_capacity and send will not block
+  *)
+  let send t ?(force=false) item =
     Mutex.lock t.mutex;
     match Waiters.wake_one t.readers (Ok item) with
     | `Ok -> Mutex.unlock t.mutex
     | `Queue_empty ->
-      (* Raise if the stream has been closed *)
+      (* broadcast that the queue is now empty *)
+      Condition.broadcast t.condition;
+
+      (* Raise if the stream has been closed. Note that all waiters will have been awakend at this point, so we can do it here *)
       let () = match t.closed with
         | Some exn ->
           Mutex.unlock t.mutex;
@@ -78,7 +93,7 @@ module Stream = struct
         | None -> ()
       in
       (* No-one is waiting for an item. Queue it. *)
-      if Queue.length t.items < t.capacity then (
+      if (force || Queue.length t.items < t.capacity) then (
         Queue.add item t.items;
         Mutex.unlock t.mutex
       ) else (
@@ -102,6 +117,14 @@ module Stream = struct
         )
       )
 
+  (* Wait until the queue is empty *)
+  let wait_empty t =
+    with_lock t.mutex @@ fun () ->
+    match Queue.is_empty t.items with
+    | true -> ()
+    | false ->
+      Condition.wait t.condition t.mutex
+
   (** Pop the first element of the stream.
       @raise exception if the stream has been closed, and there are no more message on the stream
   *)
@@ -109,6 +132,7 @@ module Stream = struct
     Mutex.lock t.mutex;
     match Queue.take_opt t.items with
     | None ->
+      Condition.signal t.condition;
       (* There aren't any items, so we probably need to wait for one.
          However, there's also the special case of a zero-capacity queue to deal with.
          [is_empty writers || capacity = 0] *)
@@ -163,31 +187,20 @@ module Stream = struct
         end
       | None -> ()
     in
+    (* message delivered directly to a waiter => queue is empty
+       message placed on queue => no waiters *)
+
     Waiters.wake_all t.writers (Error reason);
     Waiters.wake_all t.readers (Error reason);
     Mutex.unlock t.mutex
 
   let is_empty t =
-    Mutex.lock t.mutex;
-    let res = Queue.is_empty t.items in
-    Mutex.unlock t.mutex;
-    res
+    with_lock t.mutex @@ fun () -> Queue.is_empty t.items
 
-  let is_closed { closed; _ } =
-    Option.is_some closed
+  let is_full t =
+    with_lock t.mutex @@ fun () -> Queue.length t.items >= t.capacity
 
-end
+  let is_closed t  =
+    with_lock t.mutex @@ fun () -> Option.is_some t.closed
 
-module Mutex = struct
-  include Eio.Mutex
-
-  let with_lock l f =
-    lock l;
-    try
-      let res = f () in
-      unlock l;
-      res
-    with e ->
-      unlock l;
-      raise e
 end

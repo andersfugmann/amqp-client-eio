@@ -1,2 +1,19 @@
-(test
- (name amqp_client_eio))
+(executables
+ (names connection_test
+        channel_test
+        queue_test)
+ (libraries eio_main amqp_client_eio))
+
+
+(rule
+ (alias  integration)
+ (action (run ./connection_test.exe))
+)
+(rule
+ (alias  integration)
+ (action (run ./channel_test.exe))
+)
+(rule
+ (alias  integration)
+ (action (run ./queue_test.exe))
+)

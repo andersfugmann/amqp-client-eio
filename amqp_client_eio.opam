@@ -7,7 +7,7 @@ authors: ["Anders Fugmann"]
 license: "BSD-3-Clause"
 tags: ["topics" "AMQP eio multicore library ocaml"]
 homepage: "https://github.com/andersfugmann/amqp-client-eio"
-doc: "https://url/to/documentation"
+doc: "https://andersfugmann.github.io/amqp-client-eio/index.html"
 bug-reports: "https://github.com/andersfugmann/amqp-client-eio/issues"
 depends: [
   "dune" {>= "3.4"}

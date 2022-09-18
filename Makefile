@@ -1,3 +1,4 @@
+.PHONY:build
 build:
 	dune build
 
@@ -5,15 +6,25 @@ build:
 test:
 	OCAMLRUNPARM=b dune exec bin/main.exe
 
+.PHONY: integration
+integration:
+	dune build @integration --release
 
 .PHONY: clean
 clean:
 	dune clean
 
 
+.PHONY: doc
 doc:
 	dune build @doc
 
+.PHONY: update-spec
+update-spec:
+	@echo "Retrieving AMQP spec from RabbitMQ servers"
+	curl --fail https://www.rabbitmq.com/resources/specs/amqp0-9-1.extended.xml > spec/amqp0-9-1.extended.xml
+
+.PHONY: gp-pages
 gh-pages: doc
 	git clone `git config --get remote.origin.url` .gh-pages --reference .
 	git -C .gh-pages checkout --orphan gh-pages

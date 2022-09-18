@@ -6,6 +6,7 @@ ocaml.
 workflow](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml/badge.svg)](https://github.com/andersfugmann/amqp-client-eio/actions/workflows/workflow.yml)
 
 [API](https://andersfugmann.github.io/amqp-client-eio/index.html)
+
 ## Design
 
 ### Goals

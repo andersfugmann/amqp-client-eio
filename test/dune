@@ -1,9 +1,15 @@
+(library
+ (name        test_lib)
+ (libraries   eio_main eio)
+ (modules     test_lib)
+ (synopsis    "Utillity functions for integration tests"))
+
 (executables
  (names connection_test
         channel_test
         queue_test)
- (libraries eio_main amqp_client_eio))
-
+ (modules :standard \ test_lib)
+ (libraries eio_main amqp_client_eio test_lib))
 
 (rule
  (alias  integration)

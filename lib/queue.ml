@@ -32,26 +32,14 @@ let get ~no_ack channel name =
   match Spec.Basic.Get.client_request channel.Channel.service ~queue:name ~no_ack () with
   | `Get_empty _ -> None
   | `Get_ok (_result, (_content, data)) -> Some data
-(*
-
-  let open Spec.Basic in
-  let channel = Channel.channel channel in
-  Get.request channel { Get.queue=t.name; no_ack } >>= function
-  | `Get_empty () ->
-    return None
-  | `Get_ok (get_ok, (header, body))  ->
-    return (Some { Message.delivery_tag = get_ok.Get_ok.delivery_tag;
-                   Message.redelivered = get_ok.Get_ok.redelivered;
-                   Message.exchange = get_ok.Get_ok.exchange;
-                   Message.routing_key = get_ok.Get_ok.routing_key;
-                   Message.message = (header, body) })
 
 (** Publish a message directly to a queue *)
-let publish channel t ?mandatory message =
-  Exchange.publish channel Exchange.default ?mandatory
-    ~routing_key:t.name
+let publish t channel ?mandatory message =
+  Exchange.publish Exchange.default channel ?mandatory
+    ~routing_key:t
     message
 
+(*
 type 'a consumer = { channel: 'a Channel.t;
                      tag: string;
                      writer: Message.t Pipe.Writer.t }
@@ -105,31 +93,42 @@ let cancel consumer =
   Cancel.request (Channel.channel consumer.channel) { Cancel.consumer_tag = consumer.tag; no_wait = false } >>= fun _rep ->
   Channel.Internal.deregister_consumer_handler consumer.channel consumer.tag;
   Pipe.close consumer.writer
+*)
 
-let bind channel t exchange = Exchange.Internal.bind_queue channel exchange t.name
-let unbind channel t exchange = Exchange.Internal.unbind_queue channel exchange t.name
+let bind: type a. t -> _ Channel.t -> a Exchange.t -> a = fun queue channel exchange ->
+  let bind ?(routing_key="") ?(arguments=[]) () =
+    Bind.client_request channel.Channel.service ~queue ~exchange:exchange.Exchange.name ~routing_key ~no_wait:false ~arguments ()
+  in
+  match exchange.exchange_type with
+  | Direct -> fun ~queue -> bind ~routing_key:queue ()
+  | Fanout -> bind ()
+  | Topic -> fun ~topic -> bind ~routing_key:topic ()
+  | Match -> fun ~headers -> bind ~arguments:headers ()
+
+let unbind: type a. t -> _ Channel.t -> a Exchange.t -> a = fun queue channel exchange ->
+  let unbind ?(routing_key="") ?(arguments=[]) () =
+    Unbind.client_request channel.Channel.service ~queue ~exchange:exchange.Exchange.name ~routing_key ~arguments ()
+  in
+  match exchange.exchange_type with
+  | Direct -> fun ~queue -> unbind ~routing_key:queue ()
+  | Fanout -> unbind ()
+  | Topic -> fun ~topic -> unbind ~routing_key:topic ()
+  | Match -> fun ~headers -> unbind ~arguments:headers ()
 
 (** Purge the queue *)
-let purge channel t =
-  Purge.request (Channel.channel channel)
-    { Purge.queue = t.name;
-      no_wait = false;
-    } >>= fun _rep ->
-  return ()
+let purge queue channel =
+  let Purge_ok.{ message_count } =
+    Purge.client_request channel.Channel.service ~queue ~no_wait:false ()
+  in
+  message_count
 
 (** Delete the queue. *)
-let delete ?(if_unused=false) ?(if_empty=false) channel t =
-  Delete.request (Channel.channel channel)
-    { Delete.queue = t.name;
-      if_unused;
-      if_empty;
-      no_wait = false;
-    } >>= fun _rep -> return ()
-
+let delete ?(if_unused=false) ?(if_empty=false) queue channel =
+  let Delete_ok.{ message_count } = Delete.client_request channel.Channel.service ~queue ~if_unused ~if_empty ~no_wait:false () in
+  message_count
 
 (** Name of the queue *)
-let name t = t.name
+let name t = t
 
 (** Construct a queue without any validation *)
-let fake _channel name = return { name }
-*)
+let fake name = name

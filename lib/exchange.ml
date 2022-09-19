@@ -4,10 +4,10 @@ open Spec.Exchange
 (* type match_type = Any | All *)
 
 type _ exchange_type =
-  | Direct: [`Queue of string] exchange_type
+  | Direct: (queue:string -> unit) exchange_type
   | Fanout: unit exchange_type
-  | Topic:  [`Topic of string] exchange_type
-  | Match:  [`Headers of Types.header list] exchange_type
+  | Topic:  (topic:string -> unit) exchange_type
+  | Match:  (headers:Types.header list -> unit) exchange_type
 
 let direct_t = Direct
 let fanout_t = Fanout
@@ -52,27 +52,27 @@ let declare: type a. ?passive:bool -> ?durable:bool -> ?auto_delete:bool -> ?int
 let delete: _ Channel.t -> ?if_unused:bool -> _ t -> unit = fun channel ?(if_unused=false) { name; _ } ->
   Delete.client_request channel.service ~exchange:name ~if_unused ~no_wait:false ()
 
-let bind: type a. _ Channel.t -> destination: _ t -> source: a t -> a -> unit =
+let bind: type a. _ Channel.t -> destination: _ t -> source: a t -> a =
   fun channel ~destination ~source ->
   let bind ?(routing_key="") ?(arguments=[]) () =
     Bind.client_request channel.service ~destination:destination.name ~source:source.name ~routing_key ~no_wait:false ~arguments ()
   in
   match source.exchange_type with
-  | Direct -> fun (`Queue routing_key) -> bind ~routing_key ()
-  | Fanout -> fun () -> bind ()
-  | Topic -> fun (`Topic routing_key) -> bind ~routing_key ()
-  | Match -> fun (`Headers arguments) -> bind ~arguments ()
+  | Direct -> fun ~queue -> bind ~routing_key:queue ()
+  | Fanout -> bind ()
+  | Topic -> fun ~topic -> bind ~routing_key:topic ()
+  | Match -> fun ~headers -> bind ~arguments:headers ()
 
-let unbind: type a. _ Channel.t -> destination: _ t -> source: a t -> a -> unit =
+let unbind: type a. _ Channel.t -> destination: _ t -> source: a t -> a =
   fun channel ~destination ~source ->
   let unbind ?(routing_key="") ?(arguments=[]) () =
     Unbind.client_request channel.service ~destination:destination.name ~source:source.name ~routing_key ~no_wait:false ~arguments ()
   in
   match source.exchange_type with
-  | Direct -> fun (`Queue routing_key) -> unbind ~routing_key ()
-  | Fanout -> fun () -> unbind ()
-  | Topic -> fun (`Topic routing_key) -> unbind ~routing_key ()
-  | Match -> fun (`Headers arguments) -> unbind ~arguments ()
+  | Direct -> fun ~queue -> unbind ~routing_key:queue ()
+  | Fanout -> unbind ()
+  | Topic -> fun ~topic -> unbind ~routing_key:topic ()
+  | Match -> fun ~headers -> unbind ~arguments:headers ()
 
 let create_publish = Framing.create_method_frame Spec.Basic.Publish.def
 let create_content = Framing.create_content_frames Spec.Basic.Content.def

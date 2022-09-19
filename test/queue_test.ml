@@ -11,8 +11,20 @@ let test_amqp env =
     Eio.traceln "Connection created";
     let channel = Channel.init ~sw connection Channel.no_confirm in
     Eio.traceln "Channel created";
-    let _queue = Queue.declare channel "test_queue" in
+    let queue = Queue.declare channel "test_queue" in
     Eio.traceln "Queue created";
+    let _purge = Queue.purge queue channel in
+    (* Lets create a couple of message *)
+    Queue.publish queue channel (Message.make "Msg1");
+    Queue.publish queue channel (Message.make "Msg2");
+    Queue.publish queue channel (Message.make "Msg3");
+
+    (* Need to ensure that all message are flushed *)
+    Eio.Time.sleep (Eio.Stdenv.clock env) 1.0;
+
+    let deleted_messages = Queue.delete queue channel in
+    Eio.traceln "Queue deleted with %d messages" deleted_messages;
+    assert (deleted_messages = 3);
     Connection.close connection "Closed by me";
     ()
   )

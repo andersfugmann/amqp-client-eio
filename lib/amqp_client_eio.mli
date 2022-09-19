@@ -89,15 +89,17 @@ end
 module Exchange : sig
   type 'a t
   type 'a exchange_type
-  val direct_t : [ `Queue of string ] exchange_type
+
+  val direct_t : (queue:string -> unit) exchange_type
   val fanout_t : unit exchange_type
-  val topic_t : [ `Topic of string ] exchange_type
-  val match_t : [ `Headers of Types.header list ] exchange_type
-  val default : [ `Queue of string ] t
-  val amq_direct : [ `Queue of string ] t
+  val topic_t : (topic:string -> unit) exchange_type
+  val match_t : (headers:Types.header list -> unit) exchange_type
+  val default : (queue:string -> unit) t
+  val amq_direct : (queue:string -> unit) t
   val amq_fanout : unit t
-  val amq_topic : [ `Topic of string ] t
-  val amq_match : [ `Headers of Types.header list ] t
+  val amq_topic : (topic:string -> unit) t
+  val amq_match : (headers:Types.header list -> unit) t
+
   val declare :
     ?passive:bool ->
     ?durable:bool ->
@@ -106,15 +108,15 @@ module Exchange : sig
     'b Channel.t ->
     'a exchange_type -> ?arguments:Types.table -> string -> 'a t
   val delete : 'a Channel.t -> ?if_unused:bool -> 'b t -> unit
-  val bind : 'b Channel.t -> destination:'c t -> source:'a t -> 'a -> unit
-  val unbind : 'b Channel.t -> destination:'c t -> source:'a t -> 'a -> unit
+  val bind : 'b Channel.t -> destination:'c t -> source:'a t -> 'a
+  val unbind : 'b Channel.t -> destination:'c t -> source:'a t -> 'a
   val publish :
     _ t -> 'a Channel.t -> ?mandatory:bool -> routing_key:string -> Message.content -> 'a
 end
 
 
 module Queue : sig
-  type t = string
+  type t
   val message_ttl : int -> string * Types.value
   val auto_expire : int -> string * Types.value
   val max_length : int -> string * Types.value
@@ -127,7 +129,7 @@ module Queue : sig
     ?durable:bool ->
     ?exclusive:bool ->
     ?auto_delete:bool ->
-    ?passive:bool -> ?arguments:Types.table -> string -> string
+    ?passive:bool -> ?arguments:Types.table -> string -> t
 
   val declare_anonymous :
     'a Channel.t ->
@@ -137,4 +139,12 @@ module Queue : sig
     ?passive:bool -> ?arguments:Types.table -> unit -> string
 
   val get : no_ack:bool -> 'a Channel.t -> string -> Cstruct.t list option
+
+  val publish : t -> 'a Channel.t -> ?mandatory:bool -> Message.content -> 'a
+  val bind : t -> 'b Channel.t -> 'a Exchange.t -> 'a
+  val unbind : t -> 'b Channel.t -> 'a Exchange.t -> 'a
+  val purge : t -> _ Channel.t -> int
+  val delete : ?if_unused:bool -> ?if_empty:bool ->  t -> 'a Channel.t -> int
+  val name : t -> string
+  val fake : string -> t
 end

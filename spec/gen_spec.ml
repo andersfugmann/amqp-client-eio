@@ -381,9 +381,13 @@ let emit_method ?(is_content=false) class_index
     end;
 
     if server then begin
-      let responses = List.map ~f:(fun response -> sprintf "(%s.expect %s)" response (id response)) response in
-      emit ~loc:__LINE__ "let client_request = Service.client_request_response def [%s]"
-        (String.concat ~sep:"; " responses)
+      match response with
+      | [] ->
+        emit ~loc:__LINE__ "let client_request = Service.client_request def"
+      | response ->
+        let responses = List.map ~f:(fun response -> sprintf "(%s.expect %s)" response (id response)) response in
+        emit ~loc:__LINE__ "let client_request = Service.client_request_response def [%s]"
+          (String.concat ~sep:"; " responses)
     end;
   end;
   decr indent;

@@ -11,7 +11,7 @@ let dead_letter_exchange v = "x-dead-letter-exchange", Types.VLongstr v
 let dead_letter_routing_key v = "x-dead-letter-routing-key", Types.VLongstr v
 let maximum_priority v = "x-max-priority", Types.VLonglong v
 
-let declare channel ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) name =
+let declare ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) channel name =
   let Declare_ok.{ queue; message_count; consumer_count } =
     Declare.client_request channel.Channel.service
       ~queue:name ~passive ~durable ~exclusive ~auto_delete ~no_wait:false ~arguments ()
@@ -20,7 +20,7 @@ let declare channel ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(p
   Eio.traceln "Queue declared: Messages: %d. Consumers: %d" message_count consumer_count;
   name
 
-let declare_anonymous channel ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) () =
+let declare_anonymous ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) channel =
   let Declare_ok.{ queue; message_count; consumer_count } =
     Declare.client_request channel.Channel.service
       ~queue:"" ~passive ~durable ~exclusive ~auto_delete ~no_wait:false ~arguments ()
@@ -39,61 +39,21 @@ let publish t channel ?mandatory message =
     ~routing_key:t
     message
 
-(*
-type 'a consumer = { channel: 'a Channel.t;
-                     tag: string;
-                     writer: Message.t Pipe.Writer.t }
 
-(** Consume message from a queue. *)
-let consume ~id ?(no_local=false) ?(no_ack=false) ?(exclusive=false)
-    ?on_cancel channel t =
-  let open Spec.Basic in
-  let (reader, writer) = Pipe.create () in
-  let consumer_tag = Printf.sprintf "%s.%s" (Channel.Internal.unique_id channel) id
-  in
-  let on_cancel () =
-    Pipe.close_without_pushback writer;
-    match on_cancel with
-    | Some f -> f ()
-    | None -> raise (Types.Consumer_cancelled consumer_tag)
-  in
+type consumer = Channel.consumer_tag
+(* Closing the stream will cancel consumption *)
+let consume queue ?(no_local=false) ?(no_ack=false) ?(exclusive=false) ~id channel =
+  (* Need a sequential id *)
+  let receive_stream = Utils.Stream.create () in
+  let consumer_tag = Channel.register_consumer channel ~receive_stream ~id in
+  let res = Spec.Basic.Consume.client_request channel.service ~queue ~consumer_tag ~no_local ~no_ack ~exclusive ~no_wait:false ~arguments:[] () in
+  assert (res.consumer_tag = consumer_tag);
+  (consumer_tag, receive_stream)
 
-  let to_writer (deliver, header, body) =
-    { Message.delivery_tag = deliver.Deliver.delivery_tag;
-      Message.redelivered = deliver.Deliver.redelivered;
-      Message.exchange = deliver.Deliver.exchange;
-      Message.routing_key = deliver.Deliver.routing_key;
-      Message.message = (header, body) }
-    |> Pipe.write_without_pushback writer
-  in
-  let req = { Consume.queue=t.name;
-              consumer_tag;
-              no_local;
-              no_ack;
-              exclusive;
-              no_wait = false;
-              arguments = [];
-            }
-  in
-  let var = Ivar.create () in
-  let on_receive consume_ok =
-    Channel.Internal.register_consumer_handler channel consume_ok.Consume_ok.consumer_tag to_writer on_cancel;
-    Ivar.fill var consume_ok
-  in
-  let read = snd Consume_ok.Internal.read in
-  read ~once:true on_receive (Channel.channel channel);
-
-  Consume.Internal.write (Channel.channel channel) req >>= fun () ->
-  Ivar.read var >>= fun rep ->
-  let tag = rep.Consume_ok.consumer_tag in
-  return ({ channel; tag; writer }, reader)
-
-let cancel consumer =
-  let open Spec.Basic in
-  Cancel.request (Channel.channel consumer.channel) { Cancel.consumer_tag = consumer.tag; no_wait = false } >>= fun _rep ->
-  Channel.Internal.deregister_consumer_handler consumer.channel consumer.tag;
-  Pipe.close consumer.writer
-*)
+let cancel_consumer consumer_tag channel =
+  let res = Spec.Basic.Cancel.client_request channel.Channel.service ~consumer_tag ~no_wait:false () in
+  assert (res.consumer_tag = consumer_tag);
+  Channel.deregister_consumer channel ~consumer_tag
 
 let bind: type a. t -> _ Channel.t -> a Exchange.t -> a = fun queue channel exchange ->
   let bind ?(routing_key="") ?(arguments=[]) () =

@@ -23,18 +23,8 @@ type message_reply = { message_id: message_id;
                        promise: (Cstruct.t * Framing.content option) Promise.u;
                      }
 
-module Message = struct
-  type content = Spec.Basic.Content.t * string
-
-  type t =
-    { delivery_tag : int;
-      redelivered : bool;
-      exchange : string;
-      routing_key : string;
-      content: content;
-    }
-end
-type deliver = Spec.Basic.Deliver.t * Message.content
+type content = Spec.Basic.Content.t * string
+type deliver = Spec.Basic.Deliver.t * content
 
 type 'a command =
   | Send_request of { message: Cstruct.t list; replies: message_reply list }
@@ -42,10 +32,10 @@ type 'a command =
   | Publish of { data: Cstruct.t list; ack: 'a Promise.u option }
   (** Publish a message. When publisher confirms are enabled, the promise will be fulfilled when ack | nack is received.
       If not in ack mode, the given promise will be fullfilled immediately. Alternatively client can use Send_request instead *)
-  | Register_consumer of { consumer_tag: consumer_tag; stream: deliver Stream.t; promise: (unit, [ `Consumer_already_registered of string]) Result.t Promise.u; }
+  | Register_consumer of { id: string; stream: deliver Stream.t; promise: consumer_tag Promise.u; }
   (** Register a consumer. *)
   | Deregister_consumer of { consumer_tag: consumer_tag;  promise: unit Promise.u; }
-  (** De-register  a consumer. *)
+  (** De-register a consumer. *)
 
 (* TODO: Clean this up. Many of the fields do not need to be carried around. *)
 type 'a t = {
@@ -62,7 +52,18 @@ type 'a t = {
   consumers: (consumer_tag, deliver Stream.t) Hashtbl.t;
   mutable next_message_id: int;
   flow: Binary_semaphore.t;
+  mutable next_consumer_id: int;
 }
+
+let register_consumer t ~id ~receive_stream =
+  let p, u = Promise.create () in
+  Stream.send t.command_stream (Register_consumer { id; stream = receive_stream; promise = u });
+  Promise.await p
+
+let deregister_consumer t ~consumer_tag =
+  let p, u = Promise.create () in
+  Stream.send t.command_stream (Deregister_consumer { consumer_tag; promise = u });
+  Promise.await p
 
 let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
   let send t message =
@@ -99,15 +100,20 @@ let rec handle_commands t =
           t.next_message_id <- t.next_message_id + 1;
           ()
       end
-    | Register_consumer { consumer_tag; stream; promise } ->
-      begin
-        match Hashtbl.mem t.consumers consumer_tag with
-        | false ->  Hashtbl.add t.consumers consumer_tag stream
-        | true -> Eio.Promise.resolve_ok promise (Error (`Consumer_already_registered consumer_tag))
-      end
+    | Register_consumer { id; stream; promise } ->
+      let consumer_tag = Printf.sprintf "%s.%d" id t.next_consumer_id in
+      t.next_consumer_id <- t.next_consumer_id + 1;
+      Hashtbl.add t.consumers consumer_tag stream;
+      Eio.Promise.resolve_ok promise consumer_tag
     | Deregister_consumer { consumer_tag; promise } ->
-      Hashtbl.remove t.consumers consumer_tag;
-      Eio.Promise.resolve_ok promise ()
+      match Hashtbl.find_opt t.consumers  consumer_tag with
+      | Some stream ->
+        Stream.close stream (Closed "Closed by user");
+        Hashtbl.remove t.consumers consumer_tag;
+        Eio.Promise.resolve_ok promise ()
+      | None ->
+        Eio.Promise.resolve_error promise (Failure "Consumer not found")
+
   in
   handle_commands t
 
@@ -217,6 +223,7 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
     consumers = Hashtbl.create 7;
     next_message_id = 1;
     flow;
+    next_consumer_id = 0;
   }
   in
 

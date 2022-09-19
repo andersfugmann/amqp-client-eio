@@ -4,3 +4,5 @@ let run_with_timeout ?(timeout = 5.0) f =
       (fun () -> Eio.Time.sleep (Eio.Stdenv.clock env) timeout; failwith "Timeout")
       (fun () -> f env)
   )
+
+let sleep env v = Eio.Time.sleep (Eio.Stdenv.clock env) v

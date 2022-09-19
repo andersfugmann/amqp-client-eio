@@ -16,17 +16,39 @@ let test_amqp env =
     Eio.traceln "Connection created";
     let channel = Channel.init ~sw connection Channel.with_confirm in
     Eio.traceln "Channel created";
-    let queue = Queue.declare channel "queue_test" in
+    let queue = Queue.declare channel "consume_test" in
     Eio.traceln "Queue created";
     let _purge = Queue.purge queue channel in
-    (* Lets create a couple of message *)
+
+    let count = Atomic.make 0 in
+    let consumer, stream = Queue.consume queue channel ~id:"Test consumer" in
+
+    (* Start consumption *)
+    Eio.Fiber.fork ~sw (fun () ->
+      let rec loop () =
+        let deliver, (_content, body) = Stream.receive stream in
+        Eio.traceln "Received message: %s" body;
+        Message.ack channel deliver;
+        Atomic.incr count;
+        loop ()
+      in
+      try
+        loop ()
+      with
+      | _ -> ()
+    );
     Queue.publish queue channel (Message.make "Msg1") |> assert_ok;
     Queue.publish queue channel (Message.make "Msg2") |> assert_ok;
     Queue.publish queue channel (Message.make "Msg3") |> assert_ok;
 
+    (* Sleep a bit! *)
+    Test_lib.sleep env 1.0;
+
+    Queue.cancel_consumer consumer channel;
+    assert (Atomic.get count = 3);
     let deleted_messages = Queue.delete queue channel in
     Eio.traceln "Queue deleted with %d messages" deleted_messages;
-    assert (deleted_messages = 3);
+    assert (deleted_messages = 0);
     Connection.close connection "Closed by me";
     ()
   )

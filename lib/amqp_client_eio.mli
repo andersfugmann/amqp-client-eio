@@ -1,7 +1,4 @@
 module Types : sig
-  type message_id = Types.message_id = { class_id : int; method_id : int; }
-  module Message_id = Types.Message_id
-  module Frame_type = Types.Frame_type
   type bit = bool
   and octet = int
   and short = int
@@ -30,12 +27,7 @@ module Types : sig
     | VTimestamp of int
     | VUnit of unit
   type header = longstr * value
-  val print_type : string -> value -> unit
-  type nonrec int = int
-  type nonrec string = string
-  type nonrec bool = bool
 end
-
 
 module Connection : sig
   exception Closed of string
@@ -58,7 +50,7 @@ module Channel : sig
   type 'a confirm
   val no_confirm : unit confirm
   val with_confirm : [ `Ok | `Rejected ] confirm
-  exception Closed of Types.string
+  exception Closed of string
   exception Channel_closed of Spec.Channel.Close.t
   val init : sw:Eio.Switch.t -> Connection.t -> 'a confirm -> 'a t
 end
@@ -67,7 +59,14 @@ module Message : sig
   val string_header : 'a -> string -> 'a * Types.value
   val int_header : 'a -> int -> 'a * Types.value
   type content = Spec.Basic.Content.t * string
-  type t = Message.t
+  type deliver = Spec.Basic.Deliver.t =
+    { consumer_tag : string;
+      delivery_tag : int;
+      redelivered : bool;
+      exchange : string;
+      routing_key : string;
+    }
+
   val make :
     ?content_type:string ->
     ?content_encoding:string ->
@@ -81,8 +80,8 @@ module Message : sig
     ?timestamp:int ->
     ?amqp_type:string ->
     ?user_id:string -> ?app_id:string -> string -> content
-  val ack : 'a Channel.t -> ?multiple:bool -> t -> unit
-  val reject : 'a Channel.t -> ?multiple:bool -> requeue:bool -> t -> unit
+  val ack : 'a Channel.t -> ?multiple:bool -> deliver -> unit
+  val reject : 'a Channel.t -> ?multiple:bool -> requeue:bool -> deliver -> unit
   val recover : 'a Channel.t -> requeue:bool -> unit
 end
 
@@ -125,20 +124,23 @@ module Queue : sig
   val dead_letter_routing_key : string -> string * Types.value
   val maximum_priority : int -> string * Types.value
   val declare :
-    'a Channel.t ->
     ?durable:bool ->
     ?exclusive:bool ->
     ?auto_delete:bool ->
-    ?passive:bool -> ?arguments:Types.table -> string -> t
+    ?passive:bool -> ?arguments:Types.table -> 'a Channel.t -> string -> t
 
   val declare_anonymous :
-    'a Channel.t ->
     ?durable:bool ->
     ?exclusive:bool ->
     ?auto_delete:bool ->
-    ?passive:bool -> ?arguments:Types.table -> unit -> string
+    ?passive:bool -> ?arguments:Types.table -> 'a Channel.t -> string
 
   val get : no_ack:bool -> 'a Channel.t -> string -> Cstruct.t list option
+
+  type consumer
+  val consume : t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> _ Channel.t -> (consumer * (Spec.Basic.Deliver.t * Message.content) Utils.Stream.t)
+
+  val cancel_consumer : consumer -> _ Channel.t -> unit
 
   val publish : t -> 'a Channel.t -> ?mandatory:bool -> Message.content -> 'a
   val bind : t -> 'b Channel.t -> 'a Exchange.t -> 'a
@@ -148,3 +150,5 @@ module Queue : sig
   val name : t -> string
   val fake : string -> t
 end
+
+module Stream: module type of Utils.Stream

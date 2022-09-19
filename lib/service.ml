@@ -104,9 +104,21 @@ let rec list_assoc_map: ('key * 'data) list -> key:'key -> f:('data -> 'b) -> de
     Messages are decoded in the caller context.
     This function is thread safe.
 *)
+
+let client_request: ('req, _, _, _, 'make_named, unit, _, _, _, _) Protocol.Spec.def -> t -> 'make_named = fun req ->
+  let create_request = Framing.create_method_frame req in
+  let call t req =
+    let request = create_request ~channel_no:t.channel_no req in
+    Stream.send t.send_stream request
+  in
+  fun t ->
+    req.make_named (call t)
+
+
 let client_request_response:
   ('req, _, _, _, 'make_named, 'res, _, _, _, _) Protocol.Spec.def ->
   (Types.message_id * 'res response) list -> t -> 'make_named = fun req ress ->
+  assert (List.length ress > 0);
   let create_request = Framing.create_method_frame req in
   let handlers = list_assoc_map ress in
   let handler t data = function
@@ -133,17 +145,14 @@ let client_request_response:
       Promise.resolve_exn promise exn
   in
 
-  let send_request = match ress with
-    | [] -> fun t _p request -> Stream.send t.send_stream request
-    | _ ->  fun t p request ->
-      Mutex.with_lock t.client_lock @@ fun () ->
-      Queue.push (expect t p) t.expect;
-      Stream.send t.send_stream request
+  let send_request t p request =
+    Mutex.with_lock t.client_lock @@ fun () -> Queue.push (expect t p) t.expect;
+    Stream.send t.send_stream request
   in
 
   let call t req =
-    let u, p = Promise.create () in
     let request = create_request ~channel_no:t.channel_no req in
+    let u, p = Promise.create () in
     send_request t p request;
     let f = Promise.await u in
     f ()

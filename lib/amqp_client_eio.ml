@@ -5,3 +5,4 @@ module Channel = Channel
 module Exchange = Exchange
 module Message = Message
 module Queue = Queue
+module Stream = Utils.Stream

@@ -5,9 +5,14 @@ open Types
 let string_header key value = key, Types.VLongstr value
 let int_header key value = key, Types.VLonglong value
 
-include Channel.Message
-type content = Channel.Message.content
-type t = Channel.Message.t
+type content = Spec.Basic.Content.t * string
+type deliver = Spec.Basic.Deliver.t =
+    { consumer_tag : string;
+      delivery_tag : int;
+      redelivered : bool;
+      exchange : string;
+      routing_key : string;
+    }
 
 let make
     ?(content_type:string option)
@@ -43,11 +48,10 @@ let make
      reserved = None;
    }, body)
 
-
-let ack: _ Channel.t -> ?multiple:bool -> t -> unit = fun channel ?(multiple=false) t ->
+let ack: _ Channel.t -> ?multiple:bool -> deliver -> unit = fun channel ?(multiple=false) t ->
   Spec.Basic.Ack.client_request channel.service ~delivery_tag:t.delivery_tag ~multiple ()
 
-let reject: _ Channel.t -> ?multiple:bool -> requeue:bool -> t -> unit = fun channel ?(multiple=false) ~requeue t ->
+let reject: _ Channel.t -> ?multiple:bool -> requeue:bool -> deliver -> unit = fun channel ?(multiple=false) ~requeue t ->
   Spec.Basic.Nack.client_request channel.service ~delivery_tag:t.delivery_tag ~multiple ~requeue ()
 
 let recover: _ Channel.t -> requeue:bool -> unit = fun channel ~requeue ->

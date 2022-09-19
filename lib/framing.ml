@@ -184,8 +184,9 @@ let read_content receive_stream =
     | 0 -> []
     | n ->
       let (message_type, data) = Stream.receive receive_stream in
+      Eio.traceln "**** Content type is: %d (%d)" (Types.Frame_type.to_int message_type) n;
       assert (Types.Frame_type.equal message_type Types.Frame_type.Content_body);
-      data :: read_body (n - Cstruct.length data)
+      data :: read_body (n - Cstruct.length data + 1)
   in
   let (message_type, data) = Stream.receive receive_stream in
   assert (Types.Frame_type.equal message_type Types.Frame_type.Content_header);

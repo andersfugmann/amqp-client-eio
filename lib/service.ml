@@ -69,33 +69,6 @@ let expect_method_content:
   def_m.message_id, Method_content (def_c.message_id.class_id, read)
 
 
-(* optimization:
-   Apply loop unrolling from zero to 2 elements before reading the key to be looked up, we don't need to traverse
-   the list in memory for each lookup
-*)
-let rec list_assoc_map: ('key * 'data) list -> key:'key -> f:('data -> 'b) -> default:(unit -> 'b) -> 'b = fun l ->
-  match l with
-  | [] -> fun ~key:_ ~f:_ ~default -> default ()
-  | [ k, v ] -> fun ~key ~f ~default ->
-    if k = key then
-      f v
-    else
-      default ()
-  | [ k1, v1; k2, v2 ] -> fun ~key ~f ~default ->
-    if k1 = key then
-      f v1
-    else if k2 = key then
-      f v2
-    else
-      default ()
-  | (k, v) :: xs ->
-    let tail = list_assoc_map xs in
-    fun ~key ~f ~default ->
-      if k = key then
-        f v
-      else
-        tail ~key ~f ~default
-
 (* I might agree that static initialization is overdone and performance gain is questionable.
    But hey, its fun and I actually think *some* of the code is actually more readable
 *)
@@ -114,13 +87,41 @@ let client_request: ('req, _, _, _, 'make_named, unit, _, _, _, _) Protocol.Spec
   fun t ->
     req.make_named (call t)
 
+(** Helper module using peano counting to keep track of list lengths *)
+module CList = struct
+  type z
+  type 'a s = S
+  type (_, _) t =
+    | []: (z, 'a) t
+    | (::) : 'a * ('c, 'a) t -> ('c s, 'a) t
 
-let client_request_response:
+  (* Apply function on a value in an associative array.
+     Uses loop unrolling and eager evaluation to speed up lookups.
+  *)
+  let rec list_assoc_map: type c. (c, 'key * 'data) t -> key:'key -> f:('data -> 'b) -> default:(unit -> 'b) -> 'b = function
+    | [] -> fun ~key:_ ~f:_ ~default -> default ()
+    | (k1, v1) :: [] -> fun ~key ~f ~default ->
+      if k1 = key then f v1 else default ()
+    | (k1, v1) :: (k2, v2) :: [] -> fun ~key ~f ~default ->
+      if k1 = key then f v1 else if k2 = key then f v2 else default ()
+    | (k1, v1) :: (k2, v2) :: (k3, v3) :: [] -> fun ~key ~f ~default ->
+      if k1 = key then f v1 else if k2 = key then f v2 else if k3 = key then f v3 else default ()
+    | (k1, v1) :: (k2, v2) :: (k3, v3) :: xs ->
+      let rest = list_assoc_map xs in
+      fun ~key ~f ~default ->
+        if k1 = key then f v1 else if k2 = key then f v2 else if k3 = key then f v3 else rest ~key ~f ~default
+
+  let rec to_list: type a c. (c, a) t -> a List.t = function
+    | [] -> List.[]
+    | x :: xs -> List.(x :: to_list xs)
+
+end
+
+let client_request_response: type c.
   ('req, _, _, _, 'make_named, 'res, _, _, _, _) Protocol.Spec.def ->
-  (Types.message_id * 'res response) list -> t -> 'make_named = fun req ress ->
-  assert (List.length ress > 0);
+  (c CList.s, Types.message_id * 'res response) CList.t -> t -> 'make_named = fun req ress ->
   let create_request = Framing.create_method_frame req in
-  let handlers = list_assoc_map ress in
+  let handlers = CList.list_assoc_map ress in
   let handler t data = function
     | Method f -> f data
     | Method_content (class_id, f) ->
@@ -135,7 +136,7 @@ let client_request_response:
           handlers ~key:message_id ~f:(handler t data) ~default:(fun () ->
             failwith_f "Message id %s not in [%s]"
               (Types.Message_id.to_string message_id)
-              (List.map ~f:(fun (id, _) -> Types.Message_id.to_string id) ress |> String.concat ~sep:"; ")
+              (CList.to_list ress |> List.map ~f:(fun (id, _) -> Types.Message_id.to_string id) |> String.concat ~sep:"; ")
           ) |> Promise.resolve_ok promise
         with
         | Failure _ as exn -> raise exn

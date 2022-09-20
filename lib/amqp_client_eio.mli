@@ -124,29 +124,32 @@ module Queue : sig
   val dead_letter_routing_key : string -> string * Types.value
   val maximum_priority : int -> string * Types.value
   val declare :
+    _ Channel.t ->
     ?durable:bool ->
     ?exclusive:bool ->
     ?auto_delete:bool ->
-    ?passive:bool -> ?arguments:Types.table -> 'a Channel.t -> string -> t
+    ?passive:bool -> ?arguments:Types.table -> string -> t
 
   val declare_anonymous :
+    _ Channel.t ->
     ?durable:bool ->
     ?exclusive:bool ->
     ?auto_delete:bool ->
-    ?passive:bool -> ?arguments:Types.table -> 'a Channel.t -> string
+    ?passive:bool -> ?arguments:Types.table -> unit -> string
 
-  val get : no_ack:bool -> 'a Channel.t -> string -> Cstruct.t list option
+  (* Decode! *)
+  val get : 'a Channel.t -> no_ack:bool -> t -> Cstruct.t list option
 
   type consumer
-  val consume : t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> _ Channel.t -> (consumer * (Spec.Basic.Deliver.t * Message.content) Utils.Stream.t)
+  val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (Spec.Basic.Deliver.t * Message.content) Utils.Stream.t)
 
-  val cancel_consumer : consumer -> _ Channel.t -> unit
+  val cancel_consumer : _ Channel.t -> consumer -> unit
 
-  val publish : t -> 'a Channel.t -> ?mandatory:bool -> Message.content -> 'a
-  val bind : t -> 'b Channel.t -> 'a Exchange.t -> 'a
-  val unbind : t -> 'b Channel.t -> 'a Exchange.t -> 'a
-  val purge : t -> _ Channel.t -> int
-  val delete : ?if_unused:bool -> ?if_empty:bool ->  t -> 'a Channel.t -> int
+  val publish : 'a Channel.t -> t -> ?mandatory:bool -> Message.content -> 'a
+  val bind : _ Channel.t -> t -> 'a Exchange.t -> 'a
+  val unbind : _ Channel.t -> t -> 'a Exchange.t -> 'a
+  val purge : _ Channel.t -> t -> int
+  val delete : _ Channel.t -> ?if_unused:bool -> ?if_empty:bool -> t -> int
   val name : t -> string
   val fake : string -> t
 end

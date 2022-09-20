@@ -11,7 +11,7 @@ let dead_letter_exchange v = "x-dead-letter-exchange", Types.VLongstr v
 let dead_letter_routing_key v = "x-dead-letter-routing-key", Types.VLongstr v
 let maximum_priority v = "x-max-priority", Types.VLonglong v
 
-let declare ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) channel name =
+let declare channel ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) name =
   let Declare_ok.{ queue; message_count; consumer_count } =
     Declare.client_request channel.Channel.service
       ~queue:name ~passive ~durable ~exclusive ~auto_delete ~no_wait:false ~arguments ()
@@ -20,7 +20,7 @@ let declare ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=f
   Eio.traceln "Queue declared: Messages: %d. Consumers: %d" message_count consumer_count;
   name
 
-let declare_anonymous ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) channel =
+let declare_anonymous channel ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?(passive=false) ?(arguments=[]) () =
   let Declare_ok.{ queue; message_count; consumer_count } =
     Declare.client_request channel.Channel.service
       ~queue:"" ~passive ~durable ~exclusive ~auto_delete ~no_wait:false ~arguments ()
@@ -28,13 +28,13 @@ let declare_anonymous ?(durable=false) ?(exclusive=false) ?(auto_delete=false) ?
   Eio.traceln "Anonymous Queue declared: %s Messages: %d. Consumers: %d" queue message_count consumer_count;
   queue
 
-let get ~no_ack channel name =
+let get channel ~no_ack name =
   match Spec.Basic.Get.client_request channel.Channel.service ~queue:name ~no_ack () with
   | `Get_empty _ -> None
   | `Get_ok (_result, (_content, data)) -> Some data
 
 (** Publish a message directly to a queue *)
-let publish t channel ?mandatory message =
+let publish channel t ?mandatory message =
   Exchange.publish Exchange.default channel ?mandatory
     ~routing_key:t
     message
@@ -42,7 +42,7 @@ let publish t channel ?mandatory message =
 
 type consumer = Channel.consumer_tag
 (* Closing the stream will cancel consumption *)
-let consume queue ?(no_local=false) ?(no_ack=false) ?(exclusive=false) ~id channel =
+let consume channel ?(no_local=false) ?(no_ack=false) ?(exclusive=false) ~id queue =
   (* Need a sequential id *)
   let receive_stream = Utils.Stream.create () in
   let consumer_tag = Channel.register_consumer channel ~receive_stream ~id in
@@ -50,12 +50,12 @@ let consume queue ?(no_local=false) ?(no_ack=false) ?(exclusive=false) ~id chann
   assert (res.consumer_tag = consumer_tag);
   (consumer_tag, receive_stream)
 
-let cancel_consumer consumer_tag channel =
+let cancel_consumer channel consumer_tag =
   let res = Spec.Basic.Cancel.client_request channel.Channel.service ~consumer_tag ~no_wait:false () in
   assert (res.consumer_tag = consumer_tag);
   Channel.deregister_consumer channel ~consumer_tag
 
-let bind: type a. t -> _ Channel.t -> a Exchange.t -> a = fun queue channel exchange ->
+let bind: type a. _ Channel.t -> t -> a Exchange.t -> a = fun channel queue exchange ->
   let bind ?(routing_key="") ?(arguments=[]) () =
     Bind.client_request channel.Channel.service ~queue ~exchange:exchange.Exchange.name ~routing_key ~no_wait:false ~arguments ()
   in
@@ -65,7 +65,7 @@ let bind: type a. t -> _ Channel.t -> a Exchange.t -> a = fun queue channel exch
   | Topic -> fun ~topic -> bind ~routing_key:topic ()
   | Match -> fun ~headers -> bind ~arguments:headers ()
 
-let unbind: type a. t -> _ Channel.t -> a Exchange.t -> a = fun queue channel exchange ->
+let unbind: type a. _ Channel.t -> t -> a Exchange.t -> a = fun channel queue exchange ->
   let unbind ?(routing_key="") ?(arguments=[]) () =
     Unbind.client_request channel.Channel.service ~queue ~exchange:exchange.Exchange.name ~routing_key ~arguments ()
   in
@@ -76,14 +76,14 @@ let unbind: type a. t -> _ Channel.t -> a Exchange.t -> a = fun queue channel ex
   | Match -> fun ~headers -> unbind ~arguments:headers ()
 
 (** Purge the queue *)
-let purge queue channel =
+let purge channel queue =
   let Purge_ok.{ message_count } =
     Purge.client_request channel.Channel.service ~queue ~no_wait:false ()
   in
   message_count
 
 (** Delete the queue. *)
-let delete ?(if_unused=false) ?(if_empty=false) queue channel =
+let delete channel ?(if_unused=false) ?(if_empty=false) queue =
   let Delete_ok.{ message_count } = Delete.client_request channel.Channel.service ~queue ~if_unused ~if_empty ~no_wait:false () in
   message_count
 

@@ -18,13 +18,13 @@ let test_amqp env =
     Eio.traceln "Channel created";
     let queue = Queue.declare channel "queue_test" in
     Eio.traceln "Queue created";
-    let _purge = Queue.purge queue channel in
+    let _purge = Queue.purge channel queue in
     (* Lets create a couple of message *)
-    Queue.publish queue channel (Message.make "Msg1") |> assert_ok;
-    Queue.publish queue channel (Message.make "Msg2") |> assert_ok;
-    Queue.publish queue channel (Message.make "Msg3") |> assert_ok;
+    Queue.publish channel queue (Message.make "Msg1") |> assert_ok;
+    Queue.publish channel queue (Message.make "Msg2") |> assert_ok;
+    Queue.publish channel queue (Message.make "Msg3") |> assert_ok;
 
-    let deleted_messages = Queue.delete queue channel in
+    let deleted_messages = Queue.delete channel queue in
     Eio.traceln "Queue deleted with %d messages" deleted_messages;
     assert (deleted_messages = 3);
     Connection.close connection "Closed by me";

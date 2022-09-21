@@ -395,69 +395,67 @@ module Content = struct
     apply: 'apply -> 't -> 'apply_result; (* (a -> b -> c) -> t -> c *)
   }
 
-  type (_, _) edef = Def: ('t, _, 'output, _, _, _, _, _) def -> ('t, 'output) edef
-
   let rec elements: type a b. (a, b) spec -> int = function
     | _ :: tail -> 1 + elements tail
     | [] -> 0
 
-  (* This is not following spec. There may be indefinite content
+  (* This is not following spec. There may be an infinite number of content
      flags, but the current implementation only supports up to 15 flags.
   *)
   let rec read: type b c. (b, c) spec -> b -> int -> Cstruct.t -> int -> c = function
-  | Bit :: tail ->
-    let reader = read tail in
-    fun b flags t off ->
-      let value = if (flags mod 2 = 1) then Some true else Some false in
-      reader (b value) (flags lsr 1) t off
-  | head :: tail ->
-    let reader = read tail
-    and decoder = decode head in
-    fun b flags t off ->
-      let value, off =
-        if flags mod 2 = 1 then
-          let v, off = decoder t off in
-          Some v, off
-        else
-          None, off
-      in
-      reader (b value) (flags lsr 1) t off
-  | [] ->
-    fun b _flags _t _off -> b
+    | Bit :: tail ->
+      let reader = read tail in
+      fun b flags t off ->
+        let value = if (flags mod 2 = 1) then Some true else Some false in
+        reader (b value) (flags lsr 1) t off
+    | head :: tail ->
+      let reader = read tail
+      and decoder = decode head in
+      fun b flags t off ->
+        let value, off =
+          if flags mod 2 = 1 then
+            let v, off = decoder t off in
+            Some v, off
+          else
+            None, off
+        in
+        reader (b value) (flags lsr 1) t off
+    | [] ->
+      fun b _flags _t _off -> b
 
   let rec write: type b. (b, int) spec -> int -> Cstruct.t -> int -> b = function
-  | Bit :: tail ->
-    let writer = write tail in
-    fun flags t off v ->
-      let flags = flags * 2 + (match v with Some true -> 1 | _ -> 0) in
-      writer flags t off
-  | spec :: tail ->
-    let encoder = encode spec
-    and writer = write tail in
-    fun flags t off v ->
-      let flags = flags * 2 in
-      let flags, off  = match v with
-        | Some v ->
-          flags + 1, encoder t off v
-        | None ->
-          flags, off
-      in
-      writer flags t off
-  | [] -> fun flags _t _off -> flags
+    | Bit :: tail ->
+      let writer = write tail in
+      fun flags t off v ->
+        let flags = flags * 2 + (match v with Some true -> 1 | _ -> 0) in
+        writer flags t off
+    | spec :: tail ->
+      let encoder = encode spec
+      and writer = write tail in
+      fun flags t off v ->
+        let flags = flags * 2 in
+        let flags, off  = match v with
+          | Some v ->
+            flags + 1, encoder t off v
+          | None ->
+            flags, off
+        in
+        writer flags t off
+    | [] -> fun flags _t _off -> flags
 
   let rec size: type b. (b, int) spec -> int -> b = function
-  | Bit :: tail ->
-    let sizer = size tail in
-    fun acc _ -> sizer acc
-  | spec :: tail ->
-    let sizer = size tail in
-    let size = length spec in
-    fun acc v ->
-      let size = match v with
-        | Some v -> size v
-        | None -> 0
-      in
-      sizer (acc + size)
-  | [] -> fun acc -> acc
+    | Bit :: tail ->
+      let sizer = size tail in
+      fun acc _ -> sizer acc
+    | spec :: tail ->
+      let sizer = size tail in
+      let size = length spec in
+      fun acc v ->
+        let size = match v with
+          | Some v -> size v
+          | None -> 0
+        in
+        sizer (acc + size)
+    | [] -> fun acc -> acc
   let size spec = size spec 0
 end

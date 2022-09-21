@@ -3,7 +3,7 @@ open Printf
 
 let indent = ref 0
 let in_comment = ref false
-let emit_location = ref false
+let emit_location = ref true
 
 let option_iter ~f = function
   | Some v -> f v
@@ -112,13 +112,16 @@ let parse_field (attrs, nodes) =
     | exception Not_found -> Ezxmlm.get_attr "type" attrs
   in
 
-  let reserved = Ezxmlm.mem_attr "reserved" "1" attrs in
-  { Field.name; tpe; reserved; doc = doc nodes }
+  let reserved =
+    Ezxmlm.mem_attr "reserved" "1" attrs ||
+    String.equal name "reserved" (* Stupid content forgot to add reserved to the field *)
+  in
+  Field.{ name; tpe; reserved; doc = doc nodes }
 
 let parse_constant (attrs, nodes) =
   let name = Ezxmlm.get_attr "name" attrs in
   let value = Ezxmlm.get_attr "value" attrs |> int_of_string in
-  Constant { Constant.name; value; doc = doc nodes }
+  Constant Constant.{ name; value; doc = doc nodes }
 
 let parse_domain (attrs, nodes) =
   ignore nodes;
@@ -266,16 +269,15 @@ let emit_method ?(is_content=false) class_index
   emit_doc doc;
   emit ~loc:__LINE__ "module %s = struct" (variant_name name);
   incr indent;
-  let t_args =
+  let t_list =
     arguments
     |> List.filter ~f:(fun t -> not t.Field.reserved)
   in
   let option = if is_content then " option" else "" in
-  let types = List.map ~f:(fun t -> (bind_name t.Field.name), (bind_name t.Field.tpe) ^ option, t.Field.doc) t_args in
 
-  let t_args = match types with
+  let t_args = match t_list with
     | [] -> "()"
-    | t -> List.map ~f:(fun (a, _, _) -> a) t |> String.concat ~sep:"; " |> sprintf "{ %s }"
+    | t -> t |> List.map ~f:(fun t -> bind_name t.Field.name) |> String.concat ~sep:"; " |> sprintf "{ %s }"
   in
   let names =
     arguments
@@ -284,21 +286,24 @@ let emit_method ?(is_content=false) class_index
   let values =
     arguments
     |> List.map ~f:(function
-        | t when t.Field.reserved ->
-          "(reserved_value " ^ t.Field.tpe ^ ")"
-        | t -> bind_name t.Field.name
+      | Field.{ reserved = true; _ }  when is_content ->
+        "None"
+      | Field.{ tpe; reserved = true; _ } ->
+        "(reserved_value " ^ tpe ^ ")"
+      | Field.{ name; _ } -> bind_name name
       )
     |> String.concat ~sep:" "
   in
 
-  (match types with
+  (match t_list with
    | [] -> emit ~loc:__LINE__ "type t = unit"
    | t ->
      emit ~loc:__LINE__ "type t = {";
      incr indent;
-     List.iter ~f:(fun (a, b, doc) ->
-       emit "%s: %s;" a b;
-       emit_doc doc
+     List.iter ~f:(
+       function Field.{ name; tpe; doc; _ } ->
+                emit "%s: %s;" (bind_name name) ((bind_name tpe) ^ option);
+                emit_doc doc
      ) t;
      decr indent;
      emit "}");
@@ -320,7 +325,7 @@ let emit_method ?(is_content=false) class_index
   in
 
   let inames = List.filter ~f:((<>) "_") names in
-  let make_named = match types, is_content with
+  let make_named = match t_list, is_content with
     | [], _ -> sprintf "fun f -> f"
     | _ ->
       let access = match is_content with true -> "?" | false -> "~" in
@@ -328,13 +333,6 @@ let emit_method ?(is_content=false) class_index
   in
 
   let apply = sprintf "fun f %s -> f %s" t_args values in
-
-  let apply_named = match types with
-    | [] -> sprintf "fun f -> f"
-    | _ ->
-      let access = match is_content with true -> "?" | false -> "~" in
-      sprintf "fun f %s -> f %s ()" t_args (List.map ~f:(fun n -> access ^ n) inames |> String.concat ~sep:" ")
-  in
 
   emit_loc __LINE__;
   emit "let message_id = %s" message_id;
@@ -346,7 +344,6 @@ let emit_method ?(is_content=false) class_index
     emit "make = (%s);" make;
     emit "make_named = (%s);" make_named;
     emit "apply = (%s);" apply;
-    emit "apply_named = (%s);" apply_named;
     decr indent;
     ()
   in

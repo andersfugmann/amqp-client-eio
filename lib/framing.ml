@@ -184,7 +184,6 @@ let read_content receive_stream =
     | 0 -> []
     | n ->
       let (message_type, data) = Stream.receive receive_stream in
-      Eio.traceln "**** Content type is: %d (%d)" (Types.Frame_type.to_int message_type) n;
       assert (Types.Frame_type.equal message_type Types.Frame_type.Content_body);
       data :: read_body (n - Cstruct.length data + 1)
   in
@@ -195,12 +194,12 @@ let read_content receive_stream =
   let body = read_body header.body_size in
   { header; data; body }
 
-let decode_content: ('t, _, _, _, _, _, _, _, _, _) Protocol.Content.def -> content -> ('t * Cstruct.t list) = fun def ->
+let decode_content: ('t, _, _, _, _, _, _, _) Protocol.Content.def -> content -> ('t * Cstruct.t list) = fun def ->
   let decode = Protocol.Content.read def.spec in
   fun { header = { property_flags; _ }; data; body} ->
     decode def.make property_flags data 0, body
 
-let decode_method: ('t, _, _, _, _, _, _, _, _, _) Protocol.Spec.def -> Cstruct.t -> 't = fun def ->
+let decode_method: ('t, _, _, _, _, _, _, _) Protocol.Spec.def -> Cstruct.t -> 't = fun def ->
   let decode = Protocol.Spec.read def.spec in
   fun data -> decode def.make data 0
 

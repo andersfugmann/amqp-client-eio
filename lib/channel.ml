@@ -23,7 +23,7 @@ type message_reply = { message_id: message_id;
                        promise: (Cstruct.t * Framing.content option) Promise.u;
                      }
 
-type content = Spec.Basic.Content.t * string
+type content = Spec.Basic.Content.t * Cstruct.t list
 type deliver = Spec.Basic.Deliver.t * content
 
 type 'a command =
@@ -135,16 +135,8 @@ let handle_return: _ t -> Spec.Basic.Return.t -> Spec.Basic.Content.t -> Cstruct
   failwith "Not implemented"
 
 let handle_deliver: _ t -> Spec.Basic.Deliver.t -> Spec.Basic.Content.t -> Cstruct.t list -> unit = fun t deliver content body ->
-  let data = Bytes.create (Cstruct.lenv body) in
-  let (_: int) =
-    List.fold_left ~init:0 ~f:(fun offset buf ->
-      let length = Cstruct.length buf in
-      Cstruct.blit_to_bytes buf 0 data offset length; offset + length
-    ) body
-  in
-
   match Hashtbl.find_opt t.consumers deliver.consumer_tag with
-  | Some stream -> Stream.send stream (deliver, (content, Bytes.unsafe_to_string data))
+  | Some stream -> Stream.send stream (deliver, (content, body))
   | None -> failwith "Could not find consumer for delivered message"
 
 let handle_confirm: type a. a confirm -> a t -> _ = fun confirm t ->

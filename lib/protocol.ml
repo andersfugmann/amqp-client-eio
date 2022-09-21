@@ -272,16 +272,13 @@ module Spec = struct
     | [] : ('a, 'a) spec
     | (::)  : 'a elem * ('b, 'c) spec -> (('a -> 'b), 'c) spec
 
-  type ('t, 'input, 'output, 'make, 'make_named, 'make_named_result, 'apply, 'apply_result, 'apply_named, 'apply_named_result) def = {
+  type ('t, 'input, 'output, 'make, 'make_named, 'make_named_result, 'apply, 'apply_result) def = {
     message_id: message_id;
     spec: ('input, 'output) spec;
     make: 'make; (* a -> b -> t *)
     make_named: ('t -> 'make_named_result) -> 'make_named;
     apply: 'apply -> 't -> 'apply_result; (* (a -> b -> c) -> t -> c *)
-    apply_named: 'apply_named -> 't -> 'apply_named_result;
   }
-
-  type (_, _) edef = Def: ('t, _, 'output, _, _, _, _, _, _, _) def -> ('t, 'output) edef
 
   let rec read: type b c. (b, c) spec -> b -> Cstruct.t -> int -> c = function
     | (Bit :: _) as spec ->
@@ -390,16 +387,15 @@ module Content = struct
     | [] : ('a, 'a) spec
     | (::)  : 'a elem * ('b, 'c) spec -> (('a option -> 'b), 'c) spec
 
-  type ('t, 'input, 'output, 'make, 'make_named, 'make_named_result, 'apply, 'apply_result, 'apply_named, 'apply_named_result) def = {
+  type ('t, 'input, 'output, 'make, 'make_named, 'make_named_result, 'apply, 'apply_result) def = {
     message_id: message_id;
     spec: ('input, 'output) spec;
     make: 'make; (* a -> b -> t *)
     make_named: ('t -> 'make_named_result) -> 'make_named;
     apply: 'apply -> 't -> 'apply_result; (* (a -> b -> c) -> t -> c *)
-    apply_named: 'apply_named -> 't -> 'apply_named_result;
   }
 
-  type (_, _) edef = Def: ('t, _, 'output, _, _, _, _, _, _, _) def -> ('t, 'output) edef
+  type (_, _) edef = Def: ('t, _, 'output, _, _, _, _, _) def -> ('t, 'output) edef
 
   let rec elements: type a b. (a, b) spec -> int = function
     | _ :: tail -> 1 + elements tail

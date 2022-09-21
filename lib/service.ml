@@ -50,14 +50,14 @@ type 'r response =
   | Method_content of int * (Cstruct.t -> Framing.content -> unit -> 'r)
 
 let expect_method:
-  ('rep_m, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('rep_m, _, _, _, _, _, _, _) Protocol.Spec.def ->
   ('rep_m -> 'rep) -> Types.Message_id.t * 'rep response = fun def rep_f ->
   let read = Protocol.Spec.read def.spec in
   def.message_id, Method (fun data () -> rep_f (read def.make data 0))
 
 let expect_method_content:
-  ('rep_m, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
-  ('rep_c, _, _, _, _, _, _, _, _, _) Protocol.Content.def ->
+  ('rep_m, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('rep_c, _, _, _, _, _, _, _) Protocol.Content.def ->
   ('rep_m * ('rep_c * Cstruct.t list) -> 'rep) -> Types.Message_id.t * 'rep response = fun def_m def_c rep_f ->
   let decode_method = Framing.decode_method def_m in
   let decode_content = Framing.decode_content def_c in
@@ -78,7 +78,7 @@ let expect_method_content:
     This function is thread safe.
 *)
 
-let client_request: ('req, _, _, _, 'make_named, unit, _, _, _, _) Protocol.Spec.def -> t -> 'make_named = fun req ->
+let client_request: ('req, _, _, _, 'make_named, unit, _, _) Protocol.Spec.def -> t -> 'make_named = fun req ->
   let create_request = Framing.create_method_frame req in
   let call t req =
     let request = create_request ~channel_no:t.channel_no req in
@@ -118,7 +118,7 @@ module CList = struct
 end
 
 let client_request_response: type c.
-  ('req, _, _, _, 'make_named, 'res, _, _, _, _) Protocol.Spec.def ->
+  ('req, _, _, _, 'make_named, 'res, _, _) Protocol.Spec.def ->
   (c CList.s, Types.message_id * 'res response) CList.t -> t -> 'make_named = fun req ress ->
   let create_request = Framing.create_method_frame req in
   let handlers = CList.list_assoc_map ress in
@@ -163,7 +163,7 @@ let client_request_response: type c.
 
 
 let server_request:
-  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('req, _, _, _, _, _, _, _) Protocol.Spec.def ->
   t -> ('req -> unit) -> unit = fun req ->
   let decode_request = Framing.decode_method req in
   let handler f data =
@@ -176,8 +176,8 @@ let server_request:
 
 (* Content will not be decoded *)
 let server_request_content:
-  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
-  ('content, _, _, _, _, _, _, _, _, _) Protocol.Content.def ->
+  ('req,     _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('content, _, _, _, _, _, _, _) Protocol.Content.def ->
   t -> ('req -> 'content -> Cstruct.t list -> unit) -> unit = fun req content ->
   let decode_request = Framing.decode_method req in
   let decode_content = Framing.decode_content content in
@@ -193,8 +193,8 @@ let server_request_content:
     Message_table.add t.services req.message_id (handler t f)
 
 let server_request_response:
-  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
-  ('res, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('req, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('res, _, _, _, _, _, _, _) Protocol.Spec.def ->
   t -> ('req -> 'res) -> unit = fun req res ->
   let server = server_request req in
   let encode_response = Framing.create_method_frame res in
@@ -219,8 +219,8 @@ let deregister_service: _ Protocol.Spec.def -> t -> unit = fun def t ->
     The function will block until a request has been received and
     return the request/response pair *)
 let server_request_response_oneshot:
-  ('req, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
-  ('res, _, _, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('req, _, _, _, _, _, _, _) Protocol.Spec.def ->
+  ('res, _, _, _, _, _, _, _) Protocol.Spec.def ->
   t -> ('req -> 'res) -> ('req * 'res) = fun req res ->
   let server_request_response = server_request_response req res in
   let handler t f promise request =

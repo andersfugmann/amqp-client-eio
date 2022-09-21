@@ -135,13 +135,13 @@ module Queue : sig
     ?durable:bool ->
     ?exclusive:bool ->
     ?auto_delete:bool ->
-    ?passive:bool -> ?arguments:Types.table -> unit -> string
+    ?passive:bool -> ?arguments:Types.table -> unit -> t
 
   (* Decode! *)
-  val get : 'a Channel.t -> no_ack:bool -> t -> Cstruct.t list option
+  val get : 'a Channel.t -> no_ack:bool -> t -> (Spec.Basic.Get_ok.t * Message.content) option
 
   type consumer
-  val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (Spec.Basic.Deliver.t * Message.content) Utils.Stream.t)
+  val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (unit -> (Spec.Basic.Deliver.t * Message.content)))
 
   val cancel_consumer : _ Channel.t -> consumer -> unit
 

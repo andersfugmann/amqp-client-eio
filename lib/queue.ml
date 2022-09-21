@@ -31,7 +31,7 @@ let declare_anonymous channel ?(durable=false) ?(exclusive=false) ?(auto_delete=
 let get channel ~no_ack name =
   match Spec.Basic.Get.client_request channel.Channel.service ~queue:name ~no_ack () with
   | `Get_empty _ -> None
-  | `Get_ok (_result, (_content, data)) -> Some data
+  | `Get_ok (ok, (content, body)) -> Some (ok, (content, Cstruct.copyv body))
 
 (** Publish a message directly to a queue *)
 let publish channel t ?mandatory message =
@@ -48,7 +48,7 @@ let consume channel ?(no_local=false) ?(no_ack=false) ?(exclusive=false) ~id que
   let consumer_tag = Channel.register_consumer channel ~receive_stream ~id in
   let res = Spec.Basic.Consume.client_request channel.service ~queue ~consumer_tag ~no_local ~no_ack ~exclusive ~no_wait:false ~arguments:[] () in
   assert (res.consumer_tag = consumer_tag);
-  (consumer_tag, receive_stream)
+  (consumer_tag, fun () -> Utils.Stream.receive receive_stream |> fun (deliver, (content, body)) -> (deliver, (content, Cstruct.copyv body)))
 
 let cancel_consumer channel consumer_tag =
   let res = Spec.Basic.Cancel.client_request channel.Channel.service ~consumer_tag ~no_wait:false () in

@@ -21,14 +21,14 @@ let test_amqp env =
     let _purge = Queue.purge channel queue in
 
     let count = Atomic.make 0 in
-    let consumer, stream = Queue.consume channel queue ~id:"Test consumer" in
+    let consumer, consume = Queue.consume channel queue ~id:"Test consumer" in
 
     (* Start consumption *)
     Eio.Fiber.fork ~sw (fun () ->
       let rec loop () =
-        let deliver, (_content, body) = Stream.receive stream in
+        let deliver, (_content, body) = consume () in
         Eio.traceln "Received message: %s" body;
-        Message.ack channel deliver;
+        Message.ack channel deliver; (* Ack here is terrible, as we cannot ack a get message *)
         Atomic.incr count;
         loop ()
       in

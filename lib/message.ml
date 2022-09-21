@@ -44,8 +44,7 @@ let make
      timestamp;
      amqp_type;
      user_id;
-     app_id;
-     reserved = None;
+     app_id
    }, body)
 
 let ack: _ Channel.t -> ?multiple:bool -> deliver -> unit = fun channel ?(multiple=false) t ->

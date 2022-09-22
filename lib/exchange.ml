@@ -75,7 +75,26 @@ let unbind: type a. _ Channel.t -> destination: _ t -> source: a t -> a =
   | Match -> fun ~headers -> unbind ~arguments:headers ()
 
 let create_publish = Framing.create_method_frame Spec.Basic.Publish.def
-let create_content = Framing.create_content_frames Spec.Basic.Content.def
+let create_content = Framing.create_content_frame Spec.Basic.Content.def
+
+module Raw = struct
+  let publish: type a. _ t -> a Channel.t -> ?mandatory:bool -> routing_key:string -> Spec.Basic.Content.t * Cstruct.t list -> a =
+  fun t channel ?(mandatory=false) ~routing_key (content, body) ->
+  Eio.traceln "Publish Raw called";
+  let publish =
+    create_publish ~channel_no:channel.channel_no
+      Spec.Basic.Publish.{ exchange = t.name;
+                           routing_key;
+                           mandatory;
+                           immediate = false;
+                         }
+  in
+  let content = create_content ~channel_no:channel.channel_no ~body_size:(Cstruct.lenv body) content in
+  let body = Framing.create_raw_body_frames ~max_frame_size:channel.frame_max ~channel_no:channel.channel_no body in
+  let data = publish :: content :: body in
+  Channel.publish channel data
+
+end
 
 let publish: type a. _ t -> a Channel.t -> ?mandatory:bool -> routing_key:string -> Message.content -> a =
   fun t channel ?(mandatory=false) ~routing_key (content, body) ->
@@ -88,6 +107,7 @@ let publish: type a. _ t -> a Channel.t -> ?mandatory:bool -> routing_key:string
                            immediate = false;
                          }
   in
-  let content = create_content ~max_frame_size:channel.frame_max ~channel_no:channel.channel_no content body in
-  let data = publish :: content in
+  let content = create_content ~channel_no:channel.channel_no ~body_size:(String.length body) content in
+  let body = Framing.create_body_frames ~max_frame_size:channel.frame_max ~channel_no:channel.channel_no body in
+  let data = publish :: content :: body in
   Channel.publish channel data

@@ -28,32 +28,48 @@ let declare_anonymous channel ?(durable=false) ?(exclusive=false) ?(auto_delete=
   Eio.traceln "Anonymous Queue declared: %s Messages: %d. Consumers: %d" queue message_count consumer_count;
   queue
 
-let get channel ~no_ack name =
-  match Spec.Basic.Get.client_request channel.Channel.service ~queue:name ~no_ack () with
-  | `Get_empty _ -> None
-  | `Get_ok (ok, (content, body)) -> Some (ok, (content, Cstruct.copyv body))
 
-(** Publish a message directly to a queue *)
+type consumer = Channel.consumer_tag
+
+let cancel_consumer channel consumer_tag =
+  let res = Spec.Basic.Cancel.client_request channel.Channel.service ~consumer_tag ~no_wait:false () in
+  assert (res.consumer_tag = consumer_tag);
+  Channel.deregister_consumer channel ~consumer_tag
+
+module Raw = struct
+  let get channel ~no_ack name =
+    match Spec.Basic.Get.client_request channel.Channel.service ~queue:name ~no_ack () with
+    | `Get_empty () -> None
+    | `Get_ok ({ delivery_tag; redelivered; exchange; routing_key; message_count = _ }, (content, body)) ->
+      let ok = Spec.Basic.Deliver.{ consumer_tag = ""; delivery_tag; redelivered; exchange; routing_key; } in
+      Some (ok, (content, body))
+
+  let publish channel t ?mandatory message =
+    Exchange.Raw.publish Exchange.default channel ?mandatory
+      ~routing_key:t
+      message
+
+  let consume channel ?(no_local=false) ?(no_ack=false) ?(exclusive=false) ~id queue =
+    let receive_stream = Utils.Stream.create () in
+    let consumer_tag = Channel.register_consumer channel ~receive_stream ~id in
+    let res = Spec.Basic.Consume.client_request channel.service ~queue ~consumer_tag ~no_local ~no_ack ~exclusive ~no_wait:false ~arguments:[] () in
+    assert (res.consumer_tag = consumer_tag);
+    (consumer_tag, fun () -> Utils.Stream.receive receive_stream)
+end
+
+let get channel ~no_ack name =
+  Raw.get channel ~no_ack name
+  |> Option.map (fun (deliver, (content, body)) -> (deliver, (content, Cstruct.copyv body)))
+
 let publish channel t ?mandatory message =
   Exchange.publish Exchange.default channel ?mandatory
     ~routing_key:t
     message
 
 
-type consumer = Channel.consumer_tag
-(* Closing the stream will cancel consumption *)
-let consume channel ?(no_local=false) ?(no_ack=false) ?(exclusive=false) ~id queue =
-  (* Need a sequential id *)
-  let receive_stream = Utils.Stream.create () in
-  let consumer_tag = Channel.register_consumer channel ~receive_stream ~id in
-  let res = Spec.Basic.Consume.client_request channel.service ~queue ~consumer_tag ~no_local ~no_ack ~exclusive ~no_wait:false ~arguments:[] () in
-  assert (res.consumer_tag = consumer_tag);
-  (consumer_tag, fun () -> Utils.Stream.receive receive_stream |> fun (deliver, (content, body)) -> (deliver, (content, Cstruct.copyv body)))
-
-let cancel_consumer channel consumer_tag =
-  let res = Spec.Basic.Cancel.client_request channel.Channel.service ~consumer_tag ~no_wait:false () in
-  assert (res.consumer_tag = consumer_tag);
-  Channel.deregister_consumer channel ~consumer_tag
+let consume channel ?no_local ?no_ack ?exclusive ~id queue =
+  let (consumer, f) = Raw.consume channel ?no_local ?no_ack ?exclusive ~id queue in
+  (consumer, fun () -> let (deliver, (content, body)) = f () in (deliver, (content, Cstruct.copyv body)))
 
 let bind: type a. _ Channel.t -> t -> a Exchange.t -> a = fun channel queue exchange ->
   let bind ?(routing_key="") ?(arguments=[]) () =

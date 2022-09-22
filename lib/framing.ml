@@ -94,7 +94,7 @@ let read_frame source =
 
   (* Assert that we see the frame end. *)
   Frame_end.read data frame_header.Frame_header.size;
-  (frame_header, data)
+  (frame_header, Cstruct.sub data 0 frame_header.Frame_header.size)
 
 let decode_method_header data =
   let message_header = Method_header.read data 0 in
@@ -124,30 +124,31 @@ let create_method_frame_args def =
   fun ~channel_no ->
     def.make_named (create_method_frame ~channel_no)
 
-(* Create body frame *)
-let create_body_frame ~channel_no ~offset ~length body =
-  let frame = Cstruct.create_unsafe (Frame_header.size + length + Frame_end.size) in
-  let frame_offset = Frame_header.write frame 0 ~frame_type:Types.Frame_type.Content_body ~channel_no ~size:length in
-  Cstruct.blit_from_string body offset frame frame_offset length;
-  Frame_end.write frame (frame_offset + length);
-  frame
+let create_raw_body_frames acc ~channel_no data =
+  let frame = Cstruct.create_unsafe (Frame_header.size + Frame_end.size) in
+  let frame_offset = Frame_header.write frame 0 ~frame_type:Types.Frame_type.Content_body ~channel_no ~size:(Cstruct.length data) in
+  Frame_end.write frame frame_offset;
+  let frame_start = Cstruct.sub frame 0 Frame_header.size in
+  let frame_end = Cstruct.sub frame frame_offset Frame_end.size in
+  frame_end :: data :: frame_start :: acc
 
-let create_content_frames: _ Protocol.Content.def -> max_frame_size:int -> channel_no:int -> 'content -> string -> Cstruct.t list = fun def ->
+let create_raw_body_frames ~max_frame_size ~channel_no segments =
+  let rec loop acc = function
+    | [] -> acc
+    | x :: xs when Cstruct.length x > max_frame_size ->
+      let data = Cstruct.sub x 0 max_frame_size in
+      let data' = Cstruct.sub x max_frame_size (Cstruct.length x - max_frame_size) in
+      loop (create_raw_body_frames acc ~channel_no data) (data' :: xs)
+    | x :: xs ->
+      loop (create_raw_body_frames acc ~channel_no x) xs
+  in
+  segments |> List.rev |> loop [] |> List.rev
+
+let create_content_frame: _ Protocol.Content.def -> channel_no:int -> body_size:int -> 'content -> Cstruct.t = fun def ->
   let sizer = Protocol.Content.size def.spec in
   let writer = Protocol.Content.write def.spec 0 in
 
-  let rec create_body_frames ~max_frame_size ~channel_no body has_frame offset =
-    let length = String.length body in
-    match length - offset with
-    | 0 when has_frame -> []
-    | 0 -> create_body_frame ~channel_no ~offset:0 ~length body :: []
-    | n ->
-      let length = Int.min max_frame_size n in
-      create_body_frame ~offset ~channel_no ~length body :: create_body_frames ~max_frame_size ~channel_no body true (offset + length)
-  in
-
-  fun ~max_frame_size ~channel_no t body ->
-    let body_size = String.length body in
+  fun ~channel_no ~body_size t  ->
     let content_size = def.apply sizer t in
     let content = Cstruct.create_unsafe (Frame_header.size + Content_header.size + content_size + Frame_end.size) in
     let content_header_offset = Frame_header.write content 0 ~frame_type:Types.Frame_type.Content_header ~channel_no ~size:(Content_header.size + content_size) in
@@ -155,9 +156,14 @@ let create_content_frames: _ Protocol.Content.def -> max_frame_size:int -> chann
     let property_flags = def.apply (writer content (content_header_offset + Content_header.size)) t in
     let (_: int) = Content_header.write content content_header_offset ~class_id:def.message_id.class_id ~body_size ~property_flags in
     Frame_end.write content (Cstruct.length content - 1);
+    content
 
-    let body_frames = create_body_frames ~max_frame_size ~channel_no body false 0 in
-    content :: body_frames
+let create_body_frame ~channel_no ~offset ~length body =
+  let frame = Cstruct.create_unsafe (Frame_header.size + length + Frame_end.size) in
+  let frame_offset = Frame_header.write frame 0 ~frame_type:Types.Frame_type.Content_body ~channel_no ~size:length in
+  Cstruct.blit_from_string body offset frame frame_offset length;
+  Frame_end.write frame (frame_offset + length);
+  frame
 
 (* Create at least one body frame, even if the content is 0 length. Dont really know if we want that.... *)
 let create_body_frames ~max_frame_size ~channel_no body =
@@ -185,7 +191,7 @@ let read_content receive_stream =
     | n ->
       let (message_type, data) = Stream.receive receive_stream in
       assert (Types.Frame_type.equal message_type Types.Frame_type.Content_body);
-      data :: read_body (n - Cstruct.length data + 1)
+      data :: read_body (n - Cstruct.length data)
   in
   let (message_type, data) = Stream.receive receive_stream in
   assert (Types.Frame_type.equal message_type Types.Frame_type.Content_header);

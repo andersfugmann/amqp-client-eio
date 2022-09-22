@@ -2,10 +2,9 @@ open !StdLabels
 open Types
 
 
-let string_header key value = key, Types.VLongstr value
-let int_header key value = key, Types.VLonglong value
-
 type content = Spec.Basic.Content.t * string
+type content_raw = Spec.Basic.Content.t * Cstruct.t list
+
 type deliver = Spec.Basic.Deliver.t =
     { consumer_tag : string;
       delivery_tag : int;
@@ -13,6 +12,9 @@ type deliver = Spec.Basic.Deliver.t =
       exchange : string;
       routing_key : string;
     }
+
+type t = deliver * content
+type t_raw = deliver * content_raw
 
 let make
     ?(content_type:string option)

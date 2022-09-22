@@ -56,9 +56,9 @@ module Channel : sig
 end
 
 module Message : sig
-  val string_header : 'a -> string -> 'a * Types.value
-  val int_header : 'a -> int -> 'a * Types.value
   type content = Spec.Basic.Content.t * string
+  type content_raw = Spec.Basic.Content.t * Cstruct.t list
+
   type deliver = Spec.Basic.Deliver.t =
     { consumer_tag : string;
       delivery_tag : int;
@@ -66,6 +66,9 @@ module Message : sig
       exchange : string;
       routing_key : string;
     }
+
+  type t = deliver * content
+  type t_raw = deliver * content_raw
 
   val make :
     ?content_type:string ->
@@ -111,6 +114,10 @@ module Exchange : sig
   val unbind : 'b Channel.t -> destination:'c t -> source:'a t -> 'a
   val publish :
     _ t -> 'a Channel.t -> ?mandatory:bool -> routing_key:string -> Message.content -> 'a
+  module Raw : sig
+    val publish :
+      _ t -> 'a Channel.t -> ?mandatory:bool -> routing_key:string -> Message.content_raw -> 'a
+  end
 end
 
 
@@ -123,6 +130,7 @@ module Queue : sig
   val dead_letter_exchange : string -> string * Types.value
   val dead_letter_routing_key : string -> string * Types.value
   val maximum_priority : int -> string * Types.value
+
   val declare :
     _ Channel.t ->
     ?durable:bool ->
@@ -137,21 +145,23 @@ module Queue : sig
     ?auto_delete:bool ->
     ?passive:bool -> ?arguments:Types.table -> unit -> t
 
-  (* Decode! *)
-  val get : 'a Channel.t -> no_ack:bool -> t -> (Spec.Basic.Get_ok.t * Message.content) option
-
-  type consumer
-  val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (unit -> (Spec.Basic.Deliver.t * Message.content)))
-
-  val cancel_consumer : _ Channel.t -> consumer -> unit
-
-  val publish : 'a Channel.t -> t -> ?mandatory:bool -> Message.content -> 'a
   val bind : _ Channel.t -> t -> 'a Exchange.t -> 'a
   val unbind : _ Channel.t -> t -> 'a Exchange.t -> 'a
   val purge : _ Channel.t -> t -> int
   val delete : _ Channel.t -> ?if_unused:bool -> ?if_empty:bool -> t -> int
   val name : t -> string
   val fake : string -> t
-end
 
-module Stream: module type of Utils.Stream
+
+  type consumer
+  val cancel_consumer : _ Channel.t -> consumer -> unit
+
+  val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (unit -> (Message.t)))
+  val publish : 'a Channel.t -> t -> ?mandatory:bool -> Message.content -> 'a
+
+  module Raw : sig
+    val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (unit -> (Message.t_raw)))
+    val publish : 'a Channel.t -> t -> ?mandatory:bool -> Message.content_raw -> 'a
+  end
+
+end

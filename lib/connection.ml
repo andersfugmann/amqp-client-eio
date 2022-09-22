@@ -269,10 +269,11 @@ let receive_messages ~set_close_reason flow channels =
 
 let send_messages ~set_close_reason flow send_stream =
   Framing.write_protocol_header flow;
-  (* We should handle exceptions here! *)
+
   let rec loop () =
-    let frame = Stream.receive send_stream in
-    Framing.write_data flow frame;
+    (* let frames = receive send_stream in *)
+    let frames = Stream.receive_all send_stream in
+    Framing.write_frames flow frames;
     loop ()
   in
   try
@@ -333,7 +334,7 @@ let set_close_reason, get_close_reason =
   (fun () -> !close_reason)
 
 (** Create a channel to amqp *)
-let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_size) ?(max_stream_length=5) ?(credentials=Credentials.default) ?(port=5672) host =
+let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_size) ?(max_stream_length=50) ?(credentials=Credentials.default) ?(port=5672) host =
   let command_stream = Stream.create ~capacity:1 () in
 
   (* Create the streams *)

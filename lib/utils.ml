@@ -57,8 +57,6 @@ module Stream = struct
       Mutex.unlock l;
       raise e
 
-
-
   let create ?(capacity = Int.max_int) () =
     assert (capacity >= 0);
     let id = Ctf.mint_id () in
@@ -168,6 +166,21 @@ module Stream = struct
       end;
       Mutex.unlock t.mutex;
       v
+
+  let receive_all t =
+    let item = receive t in
+    let items =
+      with_lock t.mutex @@ fun () ->
+      let rec loop () =
+        match Queue.take_opt t.items with
+        | None -> []
+        | Some i -> i :: loop ()
+      in
+      let items = loop () in
+      Waiters.wake_all t.writers (Ok ());
+      items
+    in
+    item :: items
 
   (** Close the stream.
       Reading from a closed stream will raise the close exception once empty, if the stream was closed

@@ -66,11 +66,15 @@ let read_data source buffer =
   if trace then Eio.traceln "Read: (%d): %s" (Cstruct.length buffer) (Buffer.contents hex_buf);
   ()
 
-let write_data flow data =
-  let hex_buf = Buffer.create 100 in
-  Cstruct.hexdump_to_buffer hex_buf data;
-  if trace then Eio.traceln "Write: (%d): %s" (Cstruct.length data) (Buffer.contents hex_buf);
-  let source = Eio.Flow.cstruct_source [data] in
+let write_frames flow frames =
+  if (trace) then begin
+    List.iter ~f:(fun data ->
+      let hex_buf = Buffer.create 100 in
+      Cstruct.hexdump_to_buffer hex_buf data;
+      Eio.traceln "Write: (%d): %s" (Cstruct.length data) (Buffer.contents hex_buf);
+    ) frames
+  end;
+  let source = Eio.Flow.cstruct_source frames in
   Eio.Flow.copy source flow;
   ()
 
@@ -135,6 +139,7 @@ let create_raw_body_frames acc ~channel_no data =
 let create_raw_body_frames ~max_frame_size ~channel_no segments =
   let rec loop acc = function
     | [] -> acc
+    | x :: xs when Cstruct.length x = 0 -> loop acc xs
     | x :: xs when Cstruct.length x > max_frame_size ->
       let data = Cstruct.sub x 0 max_frame_size in
       let data' = Cstruct.sub x max_frame_size (Cstruct.length x - max_frame_size) in
@@ -168,15 +173,14 @@ let create_body_frame ~channel_no ~offset ~length body =
 (* Create at least one body frame, even if the content is 0 length. Dont really know if we want that.... *)
 let create_body_frames ~max_frame_size ~channel_no body =
   let length = String.length body in
-  let rec loop has_frame offset =
+  let rec loop offset =
     match length - offset with
-    | 0 when has_frame -> []
-    | 0 -> create_body_frame ~channel_no ~offset:0 ~length body :: []
+    | 0 -> []
     | n ->
       let length = Int.min max_frame_size n in
-      create_body_frame ~offset ~channel_no ~length body :: loop true (offset + length)
+      create_body_frame ~offset ~channel_no ~length body :: loop (offset + length)
   in
-  loop false 0
+  loop 0
 
 let heartbeat_frame =
   let size = Frame_header.size + 1 in

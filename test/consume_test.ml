@@ -27,7 +27,7 @@ let test_amqp env =
     Eio.Fiber.fork ~sw (fun () ->
       let rec loop () =
         let deliver, (_content, body) = consume () in
-        Eio.traceln "Received message: %s" body;
+        Eio.traceln "Received message: '%s'" body;
         Message.ack channel deliver; (* Ack here is terrible, as we cannot ack a get message *)
         Atomic.incr count;
         loop ()
@@ -38,7 +38,7 @@ let test_amqp env =
       | _ -> ()
     );
     Queue.publish channel queue (Message.make "Msg1") |> assert_ok;
-    Queue.publish channel queue (Message.make "Msg2") |> assert_ok;
+    Queue.publish channel queue (Message.make "") |> assert_ok;
     Queue.publish channel queue (Message.make "Msg3") |> assert_ok;
 
     (* Sleep a bit! *)

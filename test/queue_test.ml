@@ -21,7 +21,7 @@ let test_amqp env =
     let _purge = Queue.purge channel queue in
     (* Lets create a couple of message *)
     Queue.publish channel queue (Message.make "Msg1") |> assert_ok;
-    Queue.publish channel queue (Message.make "Msg2") |> assert_ok;
+    Queue.publish channel queue (Message.make "") |> assert_ok;
     Queue.publish channel queue (Message.make "Msg3") |> assert_ok;
 
     let deleted_messages = Queue.delete channel queue in

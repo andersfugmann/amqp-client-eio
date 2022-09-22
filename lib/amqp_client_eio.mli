@@ -158,10 +158,12 @@ module Queue : sig
 
   val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (unit -> (Message.t)))
   val publish : 'a Channel.t -> t -> ?mandatory:bool -> Message.content -> 'a
+  val get : 'a Channel.t -> no_ack:bool -> t -> Message.t option
 
   module Raw : sig
     val consume :  _ Channel.t -> ?no_local:bool -> ?no_ack:bool -> ?exclusive:bool -> id:string -> t -> (consumer * (unit -> (Message.t_raw)))
     val publish : 'a Channel.t -> t -> ?mandatory:bool -> Message.content_raw -> 'a
+    val get : 'a Channel.t -> no_ack:bool -> t -> Message.t_raw option
   end
 
 end

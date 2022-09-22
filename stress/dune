@@ -1,0 +1,3 @@
+(executable
+ (name stress)
+ (libraries eio_main amqp_client_eio))

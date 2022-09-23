@@ -80,7 +80,6 @@ let create_content = Framing.create_content_frame Spec.Basic.Content.def
 module Raw = struct
   let publish: type a. _ t -> a Channel.t -> ?mandatory:bool -> routing_key:string -> Spec.Basic.Content.t * Cstruct.t list -> a =
   fun t channel ?(mandatory=false) ~routing_key (content, body) ->
-  Eio.traceln "Publish Raw called";
   let publish =
     create_publish ~channel_no:channel.channel_no
       Spec.Basic.Publish.{ exchange = t.name;
@@ -98,7 +97,6 @@ end
 
 let publish: type a. _ t -> a Channel.t -> ?mandatory:bool -> routing_key:string -> Message.content -> a =
   fun t channel ?(mandatory=false) ~routing_key (content, body) ->
-  Eio.traceln "Publish called";
   let publish =
     create_publish ~channel_no:channel.channel_no
       Spec.Basic.Publish.{ exchange = t.name;

@@ -61,9 +61,11 @@ type content = { header: Content_header.t; data: Cstruct.t; body: Cstruct.t list
 
 let read_data source buffer =
   Eio.Flow.read_exact source buffer;
-  let hex_buf = Buffer.create 100 in
-  Cstruct.hexdump_to_buffer hex_buf buffer;
-  if trace then Eio.traceln "Read: (%d): %s" (Cstruct.length buffer) (Buffer.contents hex_buf);
+  if trace then begin
+    let hex_buf = Buffer.create 100 in
+    Cstruct.hexdump_to_buffer hex_buf buffer;
+    Eio.traceln "Read: (%d): %s" (Cstruct.length buffer) (Buffer.contents hex_buf)
+  end;
   ()
 
 let write_frames flow frames =

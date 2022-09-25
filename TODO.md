@@ -7,13 +7,12 @@ Define one exception type with a polymorphic variant for all errors
        Protocol.Content.def.
  - [x] Remove unused fields from def.
  - [x] Wrap all public modules in amqp_client_eio module.
- - [-] Add constraints to the channel class
  - [ ] Test error handling, by inserting random errors in the code.
  - [ ] When receving a body, create a buffer to hold all data and read
        into that.
  - [ ] Use flow to control queue lengths for channels.
  - [x] Handle connection block/unblock
- - [ ] Reduce fields in channel structure
+ - [x] Reduce fields in channel structure
 
 ## API support
  - [x] Connection open / close
@@ -21,3 +20,5 @@ Define one exception type with a polymorphic variant for all errors
  - [x] Queue create / delete
  - [x] Exchange operations
  - [ ] RPC endpoint (client / server)
+ - [ ] Add documentation to the API
+ - [ ] Create a landing API documentation page

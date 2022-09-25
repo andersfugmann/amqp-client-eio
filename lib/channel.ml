@@ -45,11 +45,10 @@ type 'a t = {
   channel_no: int;
   service: Service.t;
   frame_max: int;
-  ok: 'a;
-  confirms_enabled: bool;
+  publish: Cstruct.t list -> 'a;
   command_stream: 'a command Stream.t; (** Communicate commands *)
   send_stream: Cstruct.t Stream.t; (** Message send stream *)
-  flow: Binary_semaphore.t; (* We have two ways of blocking data *)
+  flow: Binary_semaphore.t; (* We have two ways of blocking data, connection blocked and channel flow. One should not override the other. So are there four states *)
 }
 
 let register_consumer t ~id ~receive_stream =
@@ -62,20 +61,24 @@ let deregister_consumer t ~consumer_tag =
   Stream.send t.command_stream (Deregister_consumer { consumer_tag; promise = u });
   Promise.await p
 
-let publish: type a. a t -> Cstruct.t list -> a = fun t data ->
-  let send t message =
-    Binary_semaphore.wait t.flow true;
-    Stream.send t.command_stream message
+let publish_confirm: type a. flow:Binary_semaphore.t -> command_stream:a command Stream.t -> a confirm -> Cstruct.t list -> a = fun ~flow ~command_stream ->
+  let send message =
+    Binary_semaphore.wait flow true;
+    Stream.send command_stream message
   in
+  function
+  | With_confirm ->
+    fun data ->
+      let p, u = Promise.create () in
+      send (Publish { data; ack=Some u });
+      Promise.await p
+  | No_confirm ->
+    fun data ->
+      Binary_semaphore.wait flow true;
+      Stream.send command_stream (Publish { data; ack=None })
 
-  match t.confirms_enabled with
-  | true ->
-    let p, u = Promise.create () in
-    send t (Publish { data; ack=Some u });
-    Promise.await p
-  | false ->
-    send t (Publish { data; ack=None });
-    t.ok
+
+let publish: type a. a t -> Cstruct.t list -> a = fun t -> t.publish
 
 let rec handle_commands t ~next_message_id ~next_consumer_id ~waiters ~consumers ~acks =
   let next_message_id, next_consumer_id =
@@ -87,15 +90,10 @@ let rec handle_commands t ~next_message_id ~next_consumer_id ~waiters ~consumers
     | Publish { data; ack }  ->
       List.iter ~f:(Stream.send t.send_stream) data;
       begin
-        match t.confirms_enabled, ack with
-        | false, None ->
-          next_message_id, next_consumer_id
-        | false, Some promise ->
-          Eio.Promise.resolve_ok promise t.ok;
-          next_message_id, next_consumer_id
-        | true, None ->
+        match ack with
+        | None ->
           next_message_id + 1, next_consumer_id
-        | true, Some promise ->
+        | Some promise ->
           Mlist.append acks (next_message_id, promise);
           next_message_id + 1, next_consumer_id
       end
@@ -182,34 +180,23 @@ let rec consume_messages ~receive_stream t =
   consume_messages ~receive_stream t
 
 let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw connection confirm_type ->
-  let has_confirm, ok =
-    let get_confirm: type a. a confirm -> bool * a = function
-      | No_confirm -> false, ()
-      | With_confirm -> true, `Ok
-    in
-    get_confirm confirm_type
-  in
-
   let flow = Binary_semaphore.create true in (* Allow flow *)
   let receive_stream = Stream.create () in
 
   (* Request channel number and register the receiving stream for same *)
-  (* TODO: Implemente flow handling *)
+  (* TODO: Implement flow handling *)
   let Connection.{ channel_no; send_stream; frame_max } = Connection.register_channel connection ~flow:(fun ~blocked -> Binary_semaphore.set flow (not blocked)) ~receive_stream in
 
   let service = Service.init ~send_stream ~receive_stream ~channel_no () in
 
+  let command_stream = Stream.create ~capacity:5 () in
   let t = {
-    confirms_enabled = has_confirm;
     channel_no;
     send_stream;
-    command_stream = Stream.create ~capacity:5 ();
+    command_stream;
     frame_max;
     service;
-    ok;
-
-    (* When we close a stream, we try to post a message. This is problematic if the consumer trues to close => deadlock. *)
-    (* So how do we close a stream? *)
+    publish = publish_confirm ~flow ~command_stream confirm_type;
     flow;
   }
   in
@@ -236,7 +223,10 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
        Spec.Channel.Open.client_request service ();
 
        (* Enable message confirms *)
-       if t.confirms_enabled then Spec.Confirm.Select.(client_request service ~nowait:false ());
+       let () = match confirm_type with
+         | With_confirm -> Spec.Confirm.Select.(client_request service ~nowait:false ())
+         | No_confirm -> ()
+       in
 
        Eio.Fiber.fork ~sw (fun () -> try handle_commands t ~next_message_id:1 ~next_consumer_id:1 ~waiters ~consumers ~acks with _ -> ());
     );

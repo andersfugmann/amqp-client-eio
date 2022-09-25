@@ -9,6 +9,7 @@ test:
 .PHONY: integration
 integration:
 	dune build @integration --release
+	@echo "ok"
 
 .PHONY: clean
 clean:

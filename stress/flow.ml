@@ -48,7 +48,7 @@ let test_amqp env =
       Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () -> Eio.Switch.run (fun sw -> send ~sw connection stream))
     );
     let (_consumer, deliver) = Queue.consume channel queue ~no_ack:true ~id:"flow consumer" in
-    consume stream deliver 10000 1_000_000;
+    Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () -> consume stream deliver 10000 1_000_000);
     Connection.close connection "Closed by me";
     ()
   )

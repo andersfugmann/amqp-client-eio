@@ -40,7 +40,7 @@ type 'a command =
 
 type consumers = (consumer_tag, deliver Stream.t) Hashtbl.t
 
-(* TODO: Clean this up. Many of the fields do not need to be carried around. *)
+(** Channel no can be removed, if we change the send to have send actually add the frame header and frame end. *)
 type 'a t = {
   channel_no: int;
   service: Service.t;
@@ -49,7 +49,7 @@ type 'a t = {
   confirms_enabled: bool;
   command_stream: 'a command Stream.t; (** Communicate commands *)
   send_stream: Cstruct.t Stream.t; (** Message send stream *)
-  flow: Binary_semaphore.t;
+  flow: Binary_semaphore.t; (* We have two ways of blocking data *)
 }
 
 let register_consumer t ~id ~receive_stream =

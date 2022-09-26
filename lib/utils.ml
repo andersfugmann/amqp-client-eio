@@ -117,13 +117,14 @@ module Stream = struct
         )
       )
 
-  (* Wait until the queue is empty *)
+  (* Wait until the queue is empty. Raises if the queue is closed *)
   let wait_empty t =
     with_lock t.mutex @@ fun () ->
     match Queue.is_empty t.items with
     | true -> ()
     | false ->
-      Condition.wait t.condition t.mutex
+      Condition.wait t.condition t.mutex;
+      Option.iter raise t.closed
 
   (** Pop the first element of the stream.
       @raise exception if the stream has been closed, and there are no more message on the stream
@@ -207,6 +208,7 @@ module Stream = struct
 
     Waiters.wake_all t.writers (Error reason);
     Waiters.wake_all t.readers (Error reason);
+    Condition.broadcast t.condition;
     Mutex.unlock t.mutex
 
   let is_empty t =
@@ -233,31 +235,29 @@ module Mutex = struct
       raise e
 end
 
-module Binary_semaphore = struct
-  type t = { condition: Condition.t; mutable value: bool; mutex: Mutex.t }
+module Monitor = struct
+  type t = Mutex.t * Condition.t
 
-  let create value =
-    { condition = Condition.create ();
-      mutex = Mutex.create ();
-      value;
-    }
+  (** Create a new monitor *)
+  let init () = (Mutex.create (), Condition.create ())
 
-  let set t v =
-    Mutex.with_lock t.mutex @@ fun () ->
-    match t.value = v with
-    | true -> ()
-    | false ->
-      t.value <- v;
-      Condition.broadcast t.condition;
-      ()
+  (** Update mutable structure state *)
+  let update (mutex, condition) update state =
+    let res = Mutex.with_lock mutex @@ fun () -> update state in
+    Condition.broadcast condition;
+    res
 
-  let wait t v =
-    let rec inner () =
-      match t.value = v with
+  (** Wait until the predicate becomes true on on the mutable shared state [state].
+      All updates to state must be made through call to update *)
+  let wait (mutex, condition) ~predicate state =
+    let rec wait () =
+      match predicate state with
       | true -> ()
       | false ->
-        Condition.await t.condition t.mutex;
-        inner ()
+        Condition.await condition mutex;
+        wait ()
     in
-    Mutex.with_lock t.mutex @@ fun () -> inner ()
+    match predicate state with
+    | false -> Mutex.with_lock mutex @@ wait
+    | true -> ()
 end

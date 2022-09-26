@@ -65,9 +65,8 @@ end
 type channel_stream = (Types.Frame_type.t * Cstruct.t) Stream.t
 type send_stream = Cstruct.t Stream.t
 type channel_info = { channel_no: int; send_stream: send_stream; frame_max: int }
-type flow = blocked:bool -> unit
 
-type command = Register_channel of { receive_stream: channel_stream; flow: flow; promise: channel_info Promise.u }
+type command = Register_channel of { receive_stream: channel_stream; set_blocked:(bool -> unit); promise: channel_info Promise.u }
              | Deregister_channel of { channel_no: int; promise: unit Promise.u }
              | Close of string
 
@@ -75,7 +74,7 @@ type t = {
   command_stream: command Stream.t;
 }
 
-let handle_register_channel ~channels ~send_stream ~max_channels ~next_channel ~frame_max ~receive_stream ~flow promise =
+let handle_register_channel ~channels ~send_stream ~max_channels ~next_channel ~frame_max ~receive_stream ~set_blocked promise =
   (* Find the next free channel no *)
   let rec find_next_free_channel idx = function
     | 0 -> failwith "No available channels"
@@ -85,7 +84,7 @@ let handle_register_channel ~channels ~send_stream ~max_channels ~next_channel ~
   in
   let channel_no = find_next_free_channel next_channel max_channels in
   (* Store back the indicator for next possible free channel number *)
-  channels.(channel_no) <- Some (receive_stream, flow);
+  channels.(channel_no) <- Some (receive_stream, set_blocked);
   Promise.resolve_ok promise { channel_no; send_stream; frame_max };
   (channel_no + 1) mod max_channels
 
@@ -96,7 +95,7 @@ let handle_deregister_channel channels channel_no promise =
 let shutdown ~send_stream ~channels ~command_stream exn =
   Stream.close send_stream exn;
   Stream.close command_stream exn;
-  Array.iter ~f:(function Some (channel, flow) -> flow ~blocked:false; Stream.close channel exn | None -> ()) channels;
+  Array.iter ~f:(function Some (channel, set_blocked) -> set_blocked false; Stream.close channel exn | None -> ()) channels;
   ()
 
 (** Command handler. User commands (and channel commands) are serialized though this. *)
@@ -104,9 +103,9 @@ let command_handler ~set_close_reason ~command_stream ~service ~send_stream ~cha
   ignore service; (* We should use the service to handle incoming requests (e.g. close and block), and to send commands to the server *)
   let rec loop next_channel =
     let next_channel = match Stream.receive command_stream with
-      | Register_channel { receive_stream; flow; promise } ->
+      | Register_channel { receive_stream; set_blocked; promise } ->
         handle_register_channel
-          ~channels ~send_stream ~max_channels ~frame_max ~next_channel ~flow ~receive_stream promise
+          ~channels ~send_stream ~max_channels ~frame_max ~next_channel ~set_blocked ~receive_stream promise
       | Deregister_channel { channel_no; promise } ->
         handle_deregister_channel channels channel_no promise;
         next_channel
@@ -126,9 +125,9 @@ let send_command t command =
 (**** User callable functions *****)
 
 (** Register consumption for a free channel *)
-let register_channel t ~flow ~receive_stream =
+let register_channel t ~set_blocked ~receive_stream =
   let pt, pu = Promise.create ~label:"Register channel" () in
-  let command = Register_channel { receive_stream; flow; promise = pu } in
+  let command = Register_channel { receive_stream; set_blocked; promise = pu } in
   send_command t command;
   Promise.await pt
 
@@ -313,11 +312,11 @@ let send_heartbeat ~clock stream freq =
 
 let handle_blocked channels Spec.Connection.Blocked.{ reason } =
   Eio.traceln ~__POS__ "Connection blocked: %s" reason;
-  Array.iter ~f:(function Some (_, flow) -> flow ~blocked:true | None -> ()) channels
+  Array.iter ~f:(function Some (_, set_blocked) -> set_blocked true | None -> ()) channels
 
 let handle_unblocked channels () =
   Eio.traceln ~__POS__ "Connection unblocked";
-  Array.iter ~f:(function Some (_, flow) -> flow ~blocked:false | None -> ()) channels
+  Array.iter ~f:(function Some (_, set_blocked) -> set_blocked false | None -> ()) channels
 
 let handle_close ~send_stream ~command_stream set_close_reason Spec.Connection.Close.{ reply_code; reply_text; class_id; method_id } =
   let reason = Printf.sprintf "Connection closed by server. %d: %s. (%d, %d)" reply_code reply_text class_id method_id in
@@ -356,7 +355,7 @@ let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_
 
        (* Register channel 0 to handle messages *)
        let channel0_stream = Stream.create () in
-       channels.(0) <- Some (channel0_stream, fun ~blocked:_ -> ());
+       channels.(0) <- Some (channel0_stream, ignore);
 
        Eio.Fiber.fork ~sw (fun () -> send_messages ~set_close_reason flow send_stream);
        Eio.Fiber.fork ~sw (fun () -> receive_messages ~set_close_reason flow channels);

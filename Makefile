@@ -5,6 +5,7 @@ build:
 .PHONY:test
 test:
 	OCAMLRUNPARM=b dune exec bin/main.exe
+	@echo "ok"
 
 .PHONY: integration
 integration:

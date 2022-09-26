@@ -9,7 +9,7 @@ let test_amqp env =
     let _queue = Queue.declare channel "test_queue" in
     Eio.traceln "Queue created";
     let () = Exchange.publish Exchange.default channel ~mandatory:true ~routing_key:"test_queue" (Message.make "1234567") in
-    Eio.Time.sleep (Eio.Stdenv.clock env) 5.0;
+    Eio.Time.sleep (Eio.Stdenv.clock env) 0.1;
     Connection.close connection "Closed by me";
     ()
   )

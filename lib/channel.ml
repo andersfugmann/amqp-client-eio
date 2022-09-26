@@ -130,7 +130,8 @@ let flow_ready monitor state =
 
 
 (** Initiate graceful shutdown *)
-let shutdown t ~waiters ~consumers ~acks reason =
+let shutdown t ~waiters ~consumers ~acks ~receive_stream reason =
+  Eio.traceln ~__POS__ "Shutting down channel %d" t.channel_no;
   Stream.close t.command_stream reason;
 
   (* Cancel all acks *)
@@ -138,6 +139,7 @@ let shutdown t ~waiters ~consumers ~acks reason =
   Queue.iter (fun waiter -> List.iter ~f:(fun { promise; _ } -> Promise.resolve_exn promise reason) waiter) waiters;
   Queue.clear waiters;
   Hashtbl.iter (fun _key stream -> Stream.close stream reason) consumers;
+  Stream.close receive_stream reason;
   ()
 
 let handle_return: _ t -> Spec.Basic.Return.t -> Spec.Basic.Content.t -> Cstruct.t list -> unit = fun t return content body ->
@@ -195,9 +197,13 @@ let consume_messages ~receive_stream t =
   loop ()
 
 let monitor_queue_length ~service ~receive_stream ~remote_flow =
-  (* We need to keep state from the server! *)
   let rec loop () =
-    Stream.wait_empty receive_stream;
+    let () =
+      try
+        Stream.wait_empty receive_stream;
+      with
+      | exn -> Eio.traceln ~__POS__ "Queue monitor closed"; raise exn
+    in
     let () =
       match !remote_flow with
       | false ->
@@ -206,6 +212,8 @@ let monitor_queue_length ~service ~receive_stream ~remote_flow =
         remote_flow := active;
       | true -> ()
     in
+    Eio_unix.sleep 1.0; (* Ahh.. no scheduing points. We should wait until the channel if full! *)
+
     loop ()
   in
   loop ()
@@ -244,7 +252,7 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
   let acks = Mlist.create () in
   Eio.Fiber.fork_sub
     ~sw
-    ~on_error:(fun exn -> Eio.traceln ~__POS__ "Channel exited: %s" (Printexc.to_string exn); shutdown t ~waiters ~consumers ~acks exn)
+    ~on_error:(fun exn -> Eio.traceln ~__POS__ "Channel exited: %s" (Printexc.to_string exn); shutdown t ~waiters ~consumers ~acks ~receive_stream exn)
     (fun sw ->
        let handle_confirm = handle_confirm confirm_type acks in
        (* Setup the service *)
@@ -255,8 +263,8 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
        Spec.Channel.Flow.server_request service (handle_flow set_flow);
        Spec.Basic.Return.server_request service (handle_return t);
 
-       let _remote_flow = ref true in
-       (* Eio.Fiber.fork ~sw (fun () -> monitor_queue_length ~service ~receive_stream ~remote_flow); *)
+       let remote_flow = ref true in
+       Eio.Fiber.fork ~sw (fun _sw -> monitor_queue_length ~service ~receive_stream ~remote_flow);
 
        (* Start handling messages before channel open *)
        Eio.Fiber.fork ~sw (fun () -> consume_messages ~receive_stream t);

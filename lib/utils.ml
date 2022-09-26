@@ -120,10 +120,12 @@ module Stream = struct
   (* Wait until the queue is empty. Raises if the queue is closed *)
   let wait_empty t =
     with_lock t.mutex @@ fun () ->
+    Option.iter raise t.closed;
     match Queue.is_empty t.items with
     | true -> ()
     | false ->
       Condition.wait t.condition t.mutex;
+      Eio.traceln "Wait empty wakeup. Closed: %b" (Option.is_some t.closed);
       Option.iter raise t.closed
 
   (** Pop the first element of the stream.
@@ -191,7 +193,7 @@ module Stream = struct
 
   *)
   let close ?message t reason =
-    Mutex.lock t.mutex;
+    with_lock t.mutex @@ fun () ->
     t.closed <- Some reason;
     (* Add the last message to the queue if needed *)
     let () = match message with
@@ -209,7 +211,9 @@ module Stream = struct
     Waiters.wake_all t.writers (Error reason);
     Waiters.wake_all t.readers (Error reason);
     Condition.broadcast t.condition;
-    Mutex.unlock t.mutex
+    Eio.traceln "Queue closed";
+    ()
+
 
   let is_empty t =
     with_lock t.mutex @@ fun () -> Queue.is_empty t.items

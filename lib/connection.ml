@@ -93,9 +93,12 @@ let handle_deregister_channel channels channel_no promise =
   Promise.resolve_ok promise ()
 
 let shutdown ~send_stream ~channels ~command_stream exn =
+  Eio.traceln ~__POS__ "Shutting down connection";
   Stream.close send_stream exn;
   Stream.close command_stream exn;
   Array.iter ~f:(function Some (channel, set_blocked) -> set_blocked false; Stream.close channel exn | None -> ()) channels;
+  Eio.traceln ~__POS__ "Shutting down connection. Done";
+
   ()
 
 (** Command handler. User commands (and channel commands) are serialized though this. *)

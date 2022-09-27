@@ -1,19 +1,32 @@
 open !StdLabels
 module Queue = Stdlib.Queue
-open Eio
 
 let failwith_f fmt = Printf.ksprintf (fun s -> failwith s) fmt
 let log fmt = Eio.traceln fmt
 
-module Promise = struct
-  type 'a t = ('a, exn) result Promise.t
-  type 'a u = ('a, exn) result Promise.u
+module Condition = struct
+  open Stdlib
+  open Eio.Private
+  type t = {
+    waiters: unit Waiters.t;
+    id: Ctf.id
+  }
 
-  let create = Promise.create
-  let await = Promise.await_exn
-  let resolve_ok = Promise.resolve_ok
-  let resolve_exn = Promise.resolve_error
-  let is_resolved = Promise.is_resolved
+  let create () = {
+    waiters = Waiters.create ();
+    id = Ctf.mint_id ();
+  }
+
+  let await t mutex =
+    match Waiters.await ~mutex:(Some mutex) t.waiters t.id with
+    | ()           -> Mutex.lock mutex
+    | exception ex -> Mutex.lock mutex; raise ex
+
+  let broadcast t =
+    Waiters.wake_all t.waiters ()
+
+  let _signal t =
+    Waiters.wake_one t.waiters ()
 end
 
 (** Extension to Eio.Stream, which allows closing the stream.
@@ -32,7 +45,6 @@ end
     We only want one message to be posted.
 *)
 module Stream = struct
-  open Stdlib
   open Eio.Private
   type 'a item = ('a, exn) result
   type 'a t = {
@@ -82,8 +94,6 @@ module Stream = struct
     match Waiters.wake_one t.readers (Ok item) with
     | `Ok -> Mutex.unlock t.mutex
     | `Queue_empty ->
-      (* broadcast that the queue is now empty *)
-      Condition.broadcast t.condition;
 
       (* Raise if the stream has been closed. Note that all waiters will have been awakend at this point, so we can do it here *)
       let () = match t.closed with
@@ -98,6 +108,8 @@ module Stream = struct
         Mutex.unlock t.mutex
       ) else (
         (* The queue is full. Wait for our turn first. *)
+        Condition.broadcast t.condition;
+
         Suspend.enter_unchecked @@ fun ctx enqueue ->
         Waiters.await_internal ~mutex:(Some t.mutex) t.writers t.id ctx (fun r ->
           (* This is called directly from [wake_one] and so we have the lock.
@@ -117,17 +129,6 @@ module Stream = struct
         )
       )
 
-  (* Wait until the queue is empty. Raises if the queue is closed *)
-  let wait_empty t =
-    with_lock t.mutex @@ fun () ->
-    Option.iter raise t.closed;
-    match Queue.is_empty t.items with
-    | true -> ()
-    | false ->
-      Condition.wait t.condition t.mutex;
-      Eio.traceln "Wait empty wakeup. Closed: %b" (Option.is_some t.closed);
-      Option.iter raise t.closed
-
   (** Pop the first element of the stream.
       @raise exception if the stream has been closed, and there are no more message on the stream
   *)
@@ -135,7 +136,7 @@ module Stream = struct
     Mutex.lock t.mutex;
     match Queue.take_opt t.items with
     | None ->
-      Condition.signal t.condition;
+      Condition.broadcast t.condition;
       (* There aren't any items, so we probably need to wait for one.
          However, there's also the special case of a zero-capacity queue to deal with.
          [is_empty writers || capacity = 0] *)
@@ -181,6 +182,7 @@ module Stream = struct
       in
       let items = loop () in
       Waiters.wake_all t.writers (Ok ());
+      Condition.broadcast t.condition; (* Signal empty *)
       items
     in
     item :: items
@@ -205,25 +207,48 @@ module Stream = struct
         end
       | None -> ()
     in
-    (* message delivered directly to a waiter => queue is empty
-       message placed on queue => no waiters *)
-
     Waiters.wake_all t.writers (Error reason);
     Waiters.wake_all t.readers (Error reason);
     Condition.broadcast t.condition;
-    Eio.traceln "Queue closed";
     ()
-
 
   let is_empty t =
     with_lock t.mutex @@ fun () -> Queue.is_empty t.items
 
-  let is_full t =
-    with_lock t.mutex @@ fun () -> Queue.length t.items >= t.capacity
-
   let is_closed t  =
     with_lock t.mutex @@ fun () -> Option.is_some t.closed
 
+  let wait ~condition t =
+    let rec loop () =
+      Option.iter raise t.closed;
+      match condition () with
+      | true -> ()
+      | false ->
+        Condition.await t.condition t.mutex;
+        loop ()
+    in
+    with_lock t.mutex @@ loop
+
+  let wait_empty t =
+    wait ~condition:(fun () -> Queue.is_empty t.items) t
+
+  let wait_full t =
+    wait ~condition:(fun () -> Queue.length t.items >= t.capacity) t
+
+
+
+end
+
+open Eio
+module Promise = struct
+  type 'a t = ('a, exn) result Promise.t
+  type 'a u = ('a, exn) result Promise.u
+
+  let create = Promise.create
+  let await = Promise.await_exn
+  let resolve_ok = Promise.resolve_ok
+  let resolve_exn = Promise.resolve_error
+  let is_resolved = Promise.is_resolved
 end
 
 module Mutex = struct
@@ -265,3 +290,112 @@ module Monitor = struct
     | false -> Mutex.with_lock mutex @@ wait
     | true -> ()
 end
+
+(*
+module Stream_naive = struct
+  type 'a t = {
+    items: 'a Queue.t;
+    waiters: Eio.Condition.t;
+    mutex: Mutex.t;
+    state: Eio.Condition.t;
+    capacity: int;
+    mutable closed: exn option;
+  }
+
+  let create ?(capacity=Int.max_int) () =
+    { items = Queue.create ();
+      waiters = Condition.create ();
+      mutex = Mutex.create ();
+      state = Condition.create ();
+      capacity;
+      closed = None;
+    }
+
+  let check_closed t = Option.iter raise t.closed
+
+  let send t ?(force = false) item =
+    let rec loop () =
+      check_closed t;
+      let length = Queue.length t.items in
+      match force || length < t.capacity with
+      | true ->
+        Queue.add item t.items;
+        length + 1;
+      | false ->
+        Condition.await t.waiters t.mutex;
+        loop ()
+    in
+    Mutex.with_lock t.mutex @@ fun () ->
+    let length = loop () in
+    if length = 1 then Condition.broadcast t.waiters;
+    if length >= t.capacity then Condition.broadcast t.state;
+    ()
+
+  let receive t =
+    let rec loop () =
+      match Queue.take_opt t.items with
+      | None ->
+        check_closed t;
+        Condition.await t.waiters t.mutex;
+        loop ()
+      | Some item ->
+        let length = Queue.length t.items in
+        if length = 0 then Condition.broadcast t.state;
+        if length = t.capacity - 1 then Condition.broadcast t.waiters;
+        item
+    in
+    Mutex.with_lock t.mutex @@ loop
+
+  let close ?message t exn =
+    Mutex.with_lock t.mutex @@ fun () ->
+    let () = match message with
+      | None -> ()
+      | Some item -> Queue.add item t.items
+    in
+    t.closed <- Some exn;
+    Condition.broadcast t.waiters;
+    Condition.broadcast t.state;
+    ()
+
+  let wait ~condition t =
+    let rec loop () =
+      check_closed t;
+      match condition t with
+      | true -> ()
+      | false ->
+        Condition.await t.state t.mutex;
+        loop ()
+    in
+    Mutex.with_lock t.mutex @@ loop
+
+  let wait_full t =
+    wait ~condition:(fun t -> Queue.length t.items >= t.capacity) t
+
+  let wait_empty t =
+    wait ~condition:(fun t -> Queue.length t.items = 0) t
+
+  let is_empty t =
+    Mutex.with_lock t.mutex @@ fun () ->
+    Queue.is_empty t.items
+
+  let receive_all t =
+    let rec purge queue =
+      match Queue.take_opt queue with
+      | Some item -> item :: purge queue
+      | None -> []
+    in
+    let rec loop () =
+      check_closed t;
+      match Queue.is_empty t.items with
+      | true ->
+        Condition.await t.waiters t.mutex;
+        loop ()
+      | false ->
+        let items = purge t.items in
+        Condition.broadcast t.waiters;
+        Condition.broadcast t.state;
+        items
+    in
+     Mutex.with_lock t.mutex @@ loop
+end
+*)

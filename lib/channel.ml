@@ -196,24 +196,17 @@ let consume_messages ~receive_stream t =
   in
   loop ()
 
-let monitor_queue_length ~service ~receive_stream ~remote_flow =
-  let rec loop () =
-    let () =
-      try
-        Stream.wait_empty receive_stream;
-      with
-      | exn -> Eio.traceln ~__POS__ "Queue monitor closed"; raise exn
-    in
-    let () =
-      match !remote_flow with
-      | false ->
-        let Spec.Channel.Flow_ok.{ active } = Spec.Channel.Flow.client_request service ~active:true () in
-        assert active;
-        remote_flow := active;
-      | true -> ()
-    in
-    Eio_unix.sleep 1.0; (* Ahh.. no scheduing points. We should wait until the channel if full! *)
+let monitor_queue_length ~service ~receive_stream =
+  let set_flow ~active =
+    let Spec.Channel.Flow_ok.{ active=active' } = Spec.Channel.Flow.client_request service ~active () in
+    assert (active' = active)
+  in
 
+  let rec loop () =
+    Stream.wait_full receive_stream;
+    set_flow ~active:false;
+    Stream.wait_empty receive_stream;
+    set_flow ~active:true;
     loop ()
   in
   loop ()
@@ -263,8 +256,7 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
        Spec.Channel.Flow.server_request service (handle_flow set_flow);
        Spec.Basic.Return.server_request service (handle_return t);
 
-       let remote_flow = ref true in
-       Eio.Fiber.fork ~sw (fun _sw -> monitor_queue_length ~service ~receive_stream ~remote_flow);
+       Eio.Fiber.fork ~sw (fun _sw -> monitor_queue_length ~service ~receive_stream);
 
        (* Start handling messages before channel open *)
        Eio.Fiber.fork ~sw (fun () -> consume_messages ~receive_stream t);

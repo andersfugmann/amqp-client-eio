@@ -30,12 +30,21 @@ module Types : sig
 end
 
 module Connection : sig
+
+  module Credentials: sig
+    type t = {
+      username : string;
+      password : string;
+      mechanism : string;
+    }
+    val make : username:string -> password:string -> t
+    val default : t
+  end
   exception Closed of string
-  module Credentials = Connection.Credentials
   type t
   val init :
-    sw:Eio__core.Switch.t ->
-    env:< clock : #Eio.Time.clock; net : #Eio.Net.t; .. > ->
+    sw:Eio.Switch.t ->
+    env:Eio.Stdenv.t ->
     id:string ->
     ?virtual_host:string ->
     ?heartbeat:int ref ->

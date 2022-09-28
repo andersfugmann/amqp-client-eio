@@ -55,8 +55,6 @@ let max_channels = 2047
 let printf fmt = Printf.printf fmt
 
 module Credentials = struct
-  type username = string
-  type password = string
   type t = { username: string; password: string; mechanism: string }
   let make ~username ~password = { username; password; mechanism = "PLAIN" }
   let default = make ~username:"guest" ~password:"guest"
@@ -353,7 +351,7 @@ let init ~sw ~env ~id ?(virtual_host="/") ?heartbeat ?(max_frame_size=max_frame_
        let clock = Eio.Stdenv.clock env in
 
        let addr = Eio_unix.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
-       let net : #Eio.Net.t = Eio.Stdenv.net env in
+       let net = Eio.Stdenv.net env in
        let flow = Eio.Net.connect ~sw net (`Tcp (addr, port)) in
 
        (* Register channel 0 to handle messages *)

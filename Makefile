@@ -16,6 +16,15 @@ integration:
 clean:
 	dune clean
 
+.PHONY: stress
+stress:
+	dune build stress/stress.exe
+	time _build/default/stress/stress.exe
+
+.PHONY: flow
+flow:
+	dune build stress/flow.exe
+	time _build/default/stress/flow.exe
 
 .PHONY: doc
 doc:

@@ -76,8 +76,7 @@ let write_frames flow frames =
       Eio.traceln "Write: (%d): %s" (Cstruct.length data) (Buffer.contents hex_buf);
     ) frames
   end;
-  let source = Eio.Flow.cstruct_source frames in
-  Eio.Flow.copy source flow;
+  Eio.Flow.write flow frames;
   ()
 
 let write_protocol_header flow =

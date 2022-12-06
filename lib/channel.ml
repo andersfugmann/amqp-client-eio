@@ -196,6 +196,41 @@ let consume_messages ~receive_stream t =
   in
   loop ()
 
+
+type consumer_state = Full | Empty
+let handle_consumer_queue ~service ~flow_queue =
+  let module Consumer_set = Set.Make(String) in
+  let set_flow ~active =
+    let Spec.Channel.Flow_ok.{ active=active' } = Spec.Channel.Flow.client_request service ~active () in
+    assert (active' = active)
+  in
+  let rec loop flow_state blocked_queues =
+    match Stream.receive flow_queue with
+    | Full, consumer_name ->
+      if not flow_state; then set_flow ~active:false;
+      let blocked_queues = Consumer_set.add consumer_name blocked_queues in
+      loop false blocked_queues
+    | Empty, consumer_name ->
+      let blocked_queues = Consumer_set.remove consumer_name blocked_queues in
+      if (Consumer_set.is_empty blocked_queues && flow_state) then set_flow ~active:true;
+      let flow_state = Consumer_set.is_empty blocked_queues in
+      loop flow_state blocked_queues
+  in
+  loop true Consumer_set.empty
+
+
+
+(* This should monitor all consumer queues, and post a message for
+   state changes every time the queue changes state.
+
+
+   Each time a consumer is created we start a fiber to flip between queue full and queue empty.
+   We send a message (empty|full, consumer_name) to a fiber.
+   The fiber should keep channel flow state and onblock if blocked and now existing consumers are blocked.Amqp_client_eio
+   We should just keep a set of consumers.
+*)
+
+
 let monitor_queue_length ~service ~receive_stream =
   let set_flow ~active =
     let Spec.Channel.Flow_ok.{ active=active' } = Spec.Channel.Flow.client_request service ~active () in
@@ -255,8 +290,6 @@ let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw 
        Spec.Channel.Close.server_request service (handle_close t);
        Spec.Channel.Flow.server_request service (handle_flow set_flow);
        Spec.Basic.Return.server_request service (handle_return t);
-
-       Eio.Fiber.fork ~sw (fun _sw -> monitor_queue_length ~service ~receive_stream);
 
        (* Start handling messages before channel open *)
        Eio.Fiber.fork ~sw (fun () -> consume_messages ~receive_stream t);

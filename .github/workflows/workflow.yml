@@ -18,8 +18,7 @@ jobs:
         os:
           - ubuntu-latest
         ocaml-compiler:
-          - ocaml-base-compiler.5.0.0~alpha1
-
+          - ocaml-base-compiler.5.0.0~rc1
     runs-on: ${{ matrix.os }}
 
     steps:

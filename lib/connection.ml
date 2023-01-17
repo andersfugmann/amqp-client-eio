@@ -255,7 +255,7 @@ let receive_messages ~set_close_reason flow channels =
     loop ()
   with
   | End_of_file
-  | Eio.Net.Connection_reset _ ->
+  | Eio.Io (Eio.Net.E Connection_reset _, _) ->
     let exn = set_close_reason (Closed "Connection lost") in
     Eio.traceln ~__POS__ "Connection lost: %s" (Printexc.to_string exn);
     Stream.close (Option.get channels.(0) |> fst) exn
@@ -280,7 +280,7 @@ let send_messages ~set_close_reason flow send_stream =
     loop ()
   with
   | End_of_file
-  | Eio.Net.Connection_reset _ ->
+  | Eio.Io (Eio.Net.E Connection_reset _, _) ->
     let exn = set_close_reason (Closed "Connection lost") in
     Eio.traceln ~__POS__ "Connection closed: %s" (Printexc.to_string exn);
     Stream.close send_stream exn

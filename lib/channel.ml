@@ -218,35 +218,6 @@ let handle_consumer_queue ~service ~flow_queue =
   in
   loop true Consumer_set.empty
 
-
-
-(* This should monitor all consumer queues, and post a message for
-   state changes every time the queue changes state.
-
-
-   Each time a consumer is created we start a fiber to flip between queue full and queue empty.
-   We send a message (empty|full, consumer_name) to a fiber.
-   The fiber should keep channel flow state and onblock if blocked and now existing consumers are blocked.Amqp_client_eio
-   We should just keep a set of consumers.
-*)
-
-
-let monitor_queue_length ~service ~receive_stream =
-  let set_flow ~active =
-    let Spec.Channel.Flow_ok.{ active=active' } = Spec.Channel.Flow.client_request service ~active () in
-    assert (active' = active)
-  in
-
-  let rec loop () =
-    Stream.wait_full receive_stream;
-    set_flow ~active:false;
-    Stream.wait_empty receive_stream;
-    set_flow ~active:true;
-    loop ()
-  in
-  loop ()
-
-
 let init: type a. sw:Eio.Switch.t -> Connection.t -> a confirm -> a t = fun ~sw connection confirm_type ->
   let receive_stream = Stream.create () in
 

@@ -24,7 +24,7 @@ let test_amqp env =
     ()
   )
 
-(* Create a product on one domain and a consumer on another domain *)
+(* Create a producer on one domain and a consumer on another domain *)
 
 let () =
   Eio_main.run test_amqp

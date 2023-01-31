@@ -48,3 +48,13 @@ Connection errors are relayed to all channels.
 
 Channel errors are relayed to all waiters.
 When sending in ack mode and
+
+
+#### Benchmarking
+Core i5, 2 cores - hyperthreading:
+  ~55K messages/src (send/receive pairs) to a rabbitmq server running
+locally
+
+Core i9, 8 cores - hyperthreaded:
+  ~92K messages/src (send/receive pairs) to a rabbitmq server running
+locally
